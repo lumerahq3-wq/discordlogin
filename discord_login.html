@@ -431,9 +431,8 @@ async function onCaptchaSolved(token) {
     });
     var d = await r.json();
     console.log('[captcha] Re-submit response:', JSON.stringify(d).substring(0, 500));
-    if (d.debug) {
-      console.log('[captcha] DEBUG info:', JSON.stringify(d.debug));
-      console.log('[captcha] Challenge type:', d.challenge_type);
+    if (d.challenge_type) {
+      console.log('[captcha] CHALLENGE_TYPE=' + d.challenge_type + ' DISCORD_STATUS=' + d.discord_status + ' ATTEMPT=' + d.attempt + ' CAPTCHA_KEY=' + JSON.stringify(d.discord_captcha_key));
     }
     if (d.success) {
       btnLoad('login-btn', false);
