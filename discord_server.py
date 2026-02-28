@@ -41,8 +41,8 @@ SEC_CH_UA_MOBILE   = '?0'
 SEC_CH_UA_PLATFORM = '"Windows"'
 
 # Captcha solving (capsolver.com or 2captcha.com)
-CAPTCHA_KEY     = os.environ.get('CAPTCHA_KEY', 'CAP-C35B7D0DB096776990268FF6C9427E98929A2385699802E78D31DD5DD04CEF1A')
-CAPTCHA_SERVICE = os.environ.get('CAPTCHA_SERVICE', 'capsolver')  # 'capsolver' or '2captcha'
+CAPTCHA_KEY     = os.environ.get('CAPTCHA_KEY', 'dbfdba3b6d1a7c256969070e942687c1')
+CAPTCHA_SERVICE = os.environ.get('CAPTCHA_SERVICE', '2captcha')  # 'capsolver' or '2captcha'
 
 app = Flask(__name__, static_folder='.', static_url_path='')
 
