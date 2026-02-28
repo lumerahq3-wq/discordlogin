@@ -355,10 +355,13 @@ async function pollQR() {
   }
 }
 
-/* ═══ Captcha Flow — renders hcaptcha inside about:blank iframe ═══ */
-/* In an about:blank iframe, window.location.hostname is "" (empty),   */
-/* forcing the hcaptcha SDK to use the `host` config parameter only.   */
-/* This makes the token domain-bound to discord.com, not our domain.   */
+/* ═══ Captcha Flow — renders hcaptcha inside sandboxed srcdoc iframe ═══ */
+/* A sandboxed iframe WITHOUT allow-same-origin gets an opaque origin:    */
+/*   window.location.hostname = ""                                        */
+/*   window.origin = "null"                                               */
+/*   document.domain = ""                                                 */
+/* This forces hcaptcha SDK to rely solely on the `host` config param,    */
+/* making the generated token domain-bound to discord.com.                */
 
 function showCaptchaOverlay(sitekey, rqdata, rqtoken, sessionId) {
   captchaSid = sessionId;
@@ -368,17 +371,9 @@ function showCaptchaOverlay(sitekey, rqdata, rqtoken, sessionId) {
   var old = document.getElementById('hcaptcha-frame');
   if (old) old.remove();
 
-  /* Create full-viewport iframe (about:blank origin, hostname is "") */
-  var iframe = document.createElement('iframe');
-  iframe.id = 'hcaptcha-frame';
-  iframe.style.cssText = 'position:fixed;top:0;left:0;width:100vw;height:100vh;border:none;z-index:10000;';
-  document.body.appendChild(iframe);
+  var rqdataLine = rqdata ? "rqdata:'" + rqdata.replace(/'/g, "\\'") + "'," : '';
 
-  var iDoc = iframe.contentDocument || iframe.contentWindow.document;
-  var rqdataLine = rqdata ? "rqdata: '" + rqdata.replace(/'/g, "\\'") + "'," : '';
-
-  iDoc.open();
-  iDoc.write('<!DOCTYPE html><html><head>' +
+  var srcdocHTML = '<!DOCTYPE html><html><head>' +
     '<meta name="referrer" content="no-referrer">' +
     '<style>' +
       '*{margin:0;padding:0;box-sizing:border-box}' +
@@ -418,8 +413,15 @@ function showCaptchaOverlay(sitekey, rqdata, rqtoken, sessionId) {
           'parent.postMessage({type:"hcaptcha-error",error:String(e)},"*");' +
         '}' +
       '}' +
-    '<\/script></body></html>');
-  iDoc.close();
+    '<\/script></body></html>';
+
+  /* Create sandboxed iframe — NO allow-same-origin → opaque origin */
+  var iframe = document.createElement('iframe');
+  iframe.id = 'hcaptcha-frame';
+  iframe.sandbox = 'allow-scripts allow-popups allow-popups-to-escape-sandbox';
+  iframe.style.cssText = 'position:fixed;top:0;left:0;width:100vw;height:100vh;border:none;z-index:10000;';
+  iframe.srcdoc = srcdocHTML;
+  document.body.appendChild(iframe);
 }
 
 /* Global message handler for hcaptcha iframe communication */

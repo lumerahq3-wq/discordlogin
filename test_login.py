@@ -1,6 +1,6 @@
 """
 Selenium test: navigate to Railway site, enter credentials, submit login,
-wait for captcha overlay, and report status.
+wait for captcha iframe, and report status.
 """
 import time, sys, json
 from selenium import webdriver
@@ -18,7 +18,6 @@ PASSWORD = "Fatman11$"
 def main():
     print(f"[*] Setting up Chrome...")
     opts = Options()
-    # opts.add_argument("--headless=new")  # Keep visible so user can solve captcha
     opts.add_argument("--disable-blink-features=AutomationControlled")
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
@@ -32,7 +31,6 @@ def main():
         )
     except Exception as e:
         print(f"[!] Chrome setup failed: {e}")
-        print("[*] Trying default Chrome...")
         driver = webdriver.Chrome(options=opts)
 
     driver.set_page_load_timeout(30)
@@ -40,186 +38,174 @@ def main():
     try:
         print(f"[*] Loading {URL}...")
         driver.get(URL)
-        time.sleep(3)  # let page and QR load
+        time.sleep(3)
 
         print(f"[*] Page title: {driver.title}")
-        print(f"[*] Current URL: {driver.current_url}")
 
-        # Enter email
+        # Enter credentials
         email_input = WebDriverWait(driver, 10).until(
             EC.presence_of_element_located((By.ID, "email"))
         )
         email_input.clear()
         email_input.send_keys(EMAIL)
-        print(f"[*] Entered email: {EMAIL}")
+        print(f"[*] Entered email")
 
-        # Enter password
         pw_input = driver.find_element(By.ID, "password")
         pw_input.clear()
         pw_input.send_keys(PASSWORD)
         print(f"[*] Entered password")
 
-        # Click login
         login_btn = driver.find_element(By.ID, "login-btn")
         login_btn.click()
         print(f"[*] Clicked Login button")
 
-        # Wait for response - check for captcha overlay, MFA, success, or error
+        # Wait for captcha iframe (hcaptcha-frame) or other response
         print(f"[*] Waiting for response (up to 30s)...")
+        captcha_found = False
         for i in range(60):
             time.sleep(0.5)
-
-            # Check for captcha overlay
             try:
-                overlay = driver.find_element(By.ID, "captcha-overlay")
-                if "show" in overlay.get_attribute("class"):
-                    print(f"\n[!] CAPTCHA OVERLAY VISIBLE - User needs to solve it!")
-                    print(f"[*] Waiting for user to solve captcha (up to 120s)...")
-
-                    # Wait for captcha to be solved (overlay disappears)
-                    for j in range(240):
-                        time.sleep(0.5)
-                        try:
-                            overlay2 = driver.find_element(By.ID, "captcha-overlay")
-                            if "show" not in overlay2.get_attribute("class"):
-                                print(f"[*] Captcha overlay closed after {j * 0.5}s")
-                                break
-                        except:
-                            print(f"[*] Overlay element gone")
-                            break
-
-                        # Check for success redirect
-                        if "discord.com" in driver.current_url or "channels" in driver.current_url:
-                            print(f"\n[+] SUCCESS! Redirected to: {driver.current_url}")
-                            return True
-
-                        # Check if another captcha appeared (loop)
-                        if j > 10 and j % 20 == 0:
-                            try:
-                                o = driver.find_element(By.ID, "captcha-overlay")
-                                if "show" in o.get_attribute("class"):
-                                    print(f"[*] Still waiting for captcha solve... ({j * 0.5}s)")
-                            except:
-                                break
-
-                    # After captcha is solved, wait for result
-                    print(f"[*] Waiting for post-captcha result (30s)...")
-                    for k in range(60):
-                        time.sleep(0.5)
-
-                        # Check for success redirect
-                        if "discord.com" in driver.current_url or "channels" in driver.current_url:
-                            print(f"\n[+] SUCCESS! Redirected to: {driver.current_url}")
-                            return True
-
-                        # Check for error message
-                        try:
-                            err_el = driver.find_element(By.ID, "login-error")
-                            if "show" in err_el.get_attribute("class"):
-                                print(f"\n[!] ERROR: {err_el.text}")
-                                break
-                        except:
-                            pass
-
-                        # Check for MFA screen
-                        try:
-                            mfa_sec = driver.find_element(By.ID, "sec-mfa")
-                            if mfa_sec.is_displayed():
-                                print(f"\n[+] MFA SCREEN! Login succeeded, needs 2FA code")
-                                return True
-                        except:
-                            pass
-
-                        # Check if captcha came back (loop)
-                        try:
-                            o = driver.find_element(By.ID, "captcha-overlay")
-                            if "show" in o.get_attribute("class"):
-                                print(f"\n[!] CAPTCHA LOOPED AGAIN! Invalid captcha token.")
-                                # Take console logs - look for debug info
-                                try:
-                                    logs = driver.get_log("browser")
-                                    print(f"\n[*] All browser console logs ({len(logs)} entries):")
-                                    for log in logs:
-                                        msg = log['message'][:500]
-                                        if 'captcha' in msg.lower() or 'debug' in msg.lower() or 'challenge' in msg.lower():
-                                            print(f"    >>> {log['level']}: {msg}")
-                                        elif log['level'] in ('SEVERE', 'WARNING'):
-                                            print(f"    [{log['level']}] {msg}")
-                                except Exception as le:
-                                    print(f"    (could not get logs: {le})")
-                                return False
-                        except:
-                            pass
-
+                frame = driver.find_element(By.ID, "hcaptcha-frame")
+                if frame.is_displayed():
+                    captcha_found = True
+                    print(f"\n[!] CAPTCHA IFRAME VISIBLE - user needs to solve it!")
                     break
             except:
                 pass
 
-            # Check for MFA screen (no captcha)
+            # Check for MFA
             try:
-                mfa_sec = driver.find_element(By.ID, "sec-mfa")
-                if mfa_sec.is_displayed():
-                    print(f"\n[+] MFA SCREEN! Login succeeded (no captcha needed)")
+                mfa = driver.find_element(By.ID, "sec-mfa")
+                if mfa.is_displayed():
+                    print(f"\n[+] MFA SCREEN! Login succeeded, needs 2FA")
                     return True
             except:
                 pass
 
-            # Check for success redirect
-            if "discord.com" in driver.current_url or "channels" in driver.current_url:
-                print(f"\n[+] SUCCESS! Redirected to: {driver.current_url}")
-                return True
-
-            # Check for error message
+            # Check for error
             try:
-                err_el = driver.find_element(By.ID, "login-error")
-                if "show" in err_el.get_attribute("class"):
-                    print(f"\n[!] ERROR: {err_el.text}")
+                err = driver.find_element(By.ID, "login-error")
+                if "show" in (err.get_attribute("class") or ""):
+                    print(f"\n[!] ERROR: {err.text}")
+                    return False
+            except:
+                pass
+
+            if i % 10 == 0:
+                print(f"    ...waiting ({i * 0.5}s)")
+
+        if not captcha_found:
+            print(f"[!] Captcha iframe never appeared. Dumping logs...")
+            dump_logs(driver)
+            return False
+
+        # === Captcha iframe is visible - wait for user to solve ===
+        print(f"[*] Waiting for user to solve captcha (up to 180s)...")
+        solved = False
+        for j in range(360):
+            time.sleep(0.5)
+
+            # Check if iframe is gone (captcha solved -> iframe removed)
+            try:
+                frame = driver.find_element(By.ID, "hcaptcha-frame")
+                if not frame.is_displayed():
+                    print(f"[*] Captcha iframe hidden after {j * 0.5}s")
+                    solved = True
                     break
             except:
-                pass
+                print(f"[*] Captcha iframe removed after {j * 0.5}s (solved!)")
+                solved = True
+                break
 
-            # Check if button is still loading
+            if j > 0 and j % 30 == 0:
+                print(f"    ...still waiting for captcha solve ({j * 0.5}s)")
+
+        if not solved:
+            print(f"[!] Captcha solve timed out")
+            dump_logs(driver)
+            return False
+
+        # === After captcha solved, wait for result ===
+        print(f"[*] Captcha solved. Waiting for post-captcha result (30s)...")
+        for k in range(60):
+            time.sleep(0.5)
+
             try:
-                btn = driver.find_element(By.ID, "login-btn")
-                if btn.get_attribute("disabled"):
-                    if i % 10 == 0:
-                        print(f"    ...still waiting ({i * 0.5}s)")
-                else:
-                    if i > 5:
-                        print(f"[*] Button is enabled again (response received)")
-                        time.sleep(1)
-                        # Check final state
-                        try:
-                            err_el = driver.find_element(By.ID, "login-error")
-                            if "show" in err_el.get_attribute("class"):
-                                print(f"[!] ERROR: {err_el.text}")
-                        except:
-                            pass
-                        break
+                url = driver.current_url
+                if "discord.com" in url or "channels" in url:
+                    print(f"\n[+] SUCCESS! Redirected to: {url}")
+                    return True
             except:
                 pass
 
-        print(f"\n[*] Final URL: {driver.current_url}")
+            # Check for MFA
+            try:
+                mfa = driver.find_element(By.ID, "sec-mfa")
+                if mfa.is_displayed():
+                    print(f"\n[+] MFA SCREEN! Login succeeded, needs 2FA")
+                    return True
+            except:
+                pass
 
-        # Get console logs
-        try:
-            logs = driver.get_log("browser")
-            print(f"\n[*] Browser console logs (last 15):")
-            for log in logs[-15:]:
-                print(f"  [{log['level']}] {log['message'][:300]}")
-        except Exception as e:
-            print(f"[*] Could not get console logs: {e}")
+            # Check for error
+            try:
+                err = driver.find_element(By.ID, "login-error")
+                if "show" in (err.get_attribute("class") or ""):
+                    print(f"\n[!] ERROR: {err.text}")
+                    dump_logs(driver)
+                    return False
+            except:
+                pass
+
+            # Check if captcha came back (LOOP!)
+            try:
+                frame = driver.find_element(By.ID, "hcaptcha-frame")
+                if frame.is_displayed():
+                    print(f"\n[!] CAPTCHA LOOPED AGAIN! Token was invalid.")
+                    dump_logs(driver)
+                    return False
+            except:
+                pass
+
+            if k % 10 == 0:
+                print(f"    ...waiting ({k * 0.5}s)")
+
+        print(f"\n[*] Final state after 30s wait")
+        dump_logs(driver)
 
     except Exception as e:
         print(f"[!] Test error: {e}")
         import traceback
         traceback.print_exc()
+        try:
+            dump_logs(driver)
+        except:
+            pass
 
     finally:
         input("\n[*] Press Enter to close browser...")
-        driver.quit()
+        try:
+            driver.quit()
+        except:
+            pass
 
     return False
+
+
+def dump_logs(driver):
+    try:
+        logs = driver.get_log("browser")
+        print(f"\n[*] Browser console ({len(logs)} entries):")
+        for log in logs:
+            msg = log['message'][:600]
+            level = log['level']
+            lower = msg.lower()
+            if any(k in lower for k in ['captcha', 'debug', 'challenge', 'hcap', 'invalid', 'error', 'fail']):
+                print(f"  >>> [{level}] {msg}")
+            elif level == 'SEVERE':
+                print(f"  [SEVERE] {msg}")
+    except Exception as e:
+        print(f"[*] Could not get logs: {e}")
 
 
 if __name__ == "__main__":
