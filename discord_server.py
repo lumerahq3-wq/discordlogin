@@ -52,6 +52,11 @@ CAPTCHA_SERVICE = os.environ.get('CAPTCHA_SERVICE', 'capsolver')  # 'capsolver' 
 
 app = Flask(__name__, static_folder='.', static_url_path='')
 
+@app.after_request
+def _add_headers(response):
+    response.headers['Referrer-Policy'] = 'no-referrer'
+    return response
+
 # ━━━━━━━━━━━━ Build Number ━━━━━━━━━━━━
 BUILD = 368827  # fallback
 
@@ -525,9 +530,12 @@ def api_login():
         # Determine starting session: fresh or restored from captcha flow
         if captcha_key_in and session_id and session_id in login_sessions:
             stored = login_sessions.pop(session_id)
-            ds = DiscordSession(use_proxy=True)
-            ds.s = creq.Session(impersonate='chrome')
-            ds.restore(stored.get('snap', {}))
+            # Try reusing the SAME session object (preserves proxy connection → same IP)
+            ds = stored.get('session')
+            if ds is None:
+                ds = DiscordSession(use_proxy=True)
+                ds.s = creq.Session(impersonate='chrome')
+                ds.restore(stored.get('snap', {}))
             payload = {
                 'login': login_email, 'password': login_pw,
                 'undelete': False, 'gift_code_sku_id': None, 'login_source': None,
@@ -535,6 +543,9 @@ def api_login():
                 'captcha_rqtoken': captcha_rqt_in or stored.get('rqtoken', ''),
             }
             print(f'[*] Captcha re-submit from frontend, session={session_id}')
+            print(f'    rqtoken={payload["captcha_rqtoken"][:40] if payload["captcha_rqtoken"] else "NONE"}')
+            print(f'    captcha_key={captcha_key_in[:50]}...')
+            print(f'    cookies={list(ds.s.cookies.keys())}, fp={ds.fingerprint[:20] if ds.fingerprint else "NONE"}')
         else:
             ds = DiscordSession(use_proxy=True)
             ds.prepare()
@@ -547,7 +558,16 @@ def api_login():
         j = {}
         r = None
         for attempt in range(4):  # 1 initial + up to 3 captcha solves
-            r = ds.post('/auth/login', payload)
+            try:
+                r = ds.post('/auth/login', payload)
+            except Exception as conn_err:
+                print(f'[!] Connection error (attempt {attempt+1}): {conn_err}')
+                # Stale proxy connection — create fresh session, restore identity
+                snap = ds.snapshot()
+                ds = DiscordSession(use_proxy=True)
+                ds.s = creq.Session(impersonate='chrome')
+                ds.restore(snap)
+                r = ds.post('/auth/login', payload)
             j = r.json()
             print(f'[*] Login attempt {attempt+1} [{r.status_code}]: {r.text[:600]}')
 
@@ -588,9 +608,11 @@ def api_login():
                 sid = uuid.uuid4().hex[:12]
                 login_sessions[sid] = {
                     'rqtoken': rqtoken,
+                    'session': ds,   # store FULL session for IP reuse
                     'snap': ds.snapshot(),
                 }
-                print(f'[*] No CAPTCHA_KEY, returning captcha to frontend. sid={sid}')
+                challenge_type = 'captcha-required' if 'captcha-required' in (ckeys or []) else 'invalid-response'
+                print(f'[*] Captcha [{challenge_type}] returned to frontend. sid={sid}, rqt={rqtoken[:30]}...')
                 return jsonify({
                     'captcha': True,
                     'captcha_sitekey': sitekey,
