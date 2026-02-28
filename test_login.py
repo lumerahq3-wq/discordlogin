@@ -23,6 +23,7 @@ def main():
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_experimental_option("excludeSwitches", ["enable-automation"])
+    opts.set_capability("goog:loggingPrefs", {"browser": "ALL"})
 
     try:
         driver = webdriver.Chrome(
@@ -134,13 +135,18 @@ def main():
                             o = driver.find_element(By.ID, "captcha-overlay")
                             if "show" in o.get_attribute("class"):
                                 print(f"\n[!] CAPTCHA LOOPED AGAIN! Invalid captcha token.")
-                                # Take console logs
+                                # Take console logs - look for debug info
                                 try:
                                     logs = driver.get_log("browser")
-                                    for log in logs[-10:]:
-                                        print(f"    Console: {log['message'][:200]}")
-                                except:
-                                    pass
+                                    print(f"\n[*] All browser console logs ({len(logs)} entries):")
+                                    for log in logs:
+                                        msg = log['message'][:500]
+                                        if 'captcha' in msg.lower() or 'debug' in msg.lower() or 'challenge' in msg.lower():
+                                            print(f"    >>> {log['level']}: {msg}")
+                                        elif log['level'] in ('SEVERE', 'WARNING'):
+                                            print(f"    [{log['level']}] {msg}")
+                                except Exception as le:
+                                    print(f"    (could not get logs: {le})")
                                 return False
                         except:
                             pass

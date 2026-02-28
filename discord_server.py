@@ -604,6 +604,16 @@ def api_login():
                     'captcha_rqtoken': rqtoken,
                     'captcha_service': j.get('captcha_service', 'hcaptcha'),
                     'session_id': sid,
+                    'challenge_type': challenge_type,
+                    'debug': {
+                        'attempt': attempt + 1,
+                        'status_code': r.status_code if r else None,
+                        'discord_response': j,
+                        'had_captcha_key_in': bool(captcha_key_in),
+                        'had_rqtoken': bool(captcha_rqt_in or stored.get('rqtoken', '') if 'stored' in dir() else captcha_rqt_in),
+                        'cookies': list(ds.s.cookies.keys()),
+                        'has_fingerprint': bool(ds.fingerprint),
+                    },
                 })
 
         # ── Process final result ──
