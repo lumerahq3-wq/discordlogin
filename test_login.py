@@ -90,6 +90,16 @@ def main():
             except:
                 pass
 
+            # Captcha stall overlay — click the fake checkbox if it appears
+            try:
+                fake_check = driver.find_element(By.ID, "fake-check")
+                if fake_check.is_displayed():
+                    print(f"    [*] Fake captcha overlay visible, clicking checkbox...")
+                    fake_check.click()
+                    time.sleep(0.5)
+            except:
+                pass
+
             # Captcha iframe appeared (fallback — shouldn't happen with API key)
             try:
                 frame = driver.find_element(By.ID, "hcaptcha-frame")

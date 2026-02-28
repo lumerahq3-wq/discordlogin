@@ -335,10 +335,11 @@ def solve_captcha(sitekey, rqdata):
     else:  # capsolver — enterprise proxyless (no proxy required)
         api_base = 'https://api.capsolver.com'
         task = {
-            'type': 'HCaptchaEnterpriseTaskProxyLess',
+            'type': 'HCaptchaTaskProxyLess',
             'websiteURL': 'https://discord.com/login',
             'websiteKey': sitekey,
             'userAgent': UA,
+            'isEnterprise': True,
         }
         if rqdata:
             task['enterprisePayload'] = {'rqdata': rqdata}
