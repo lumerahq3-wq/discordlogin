@@ -772,7 +772,11 @@ function backToLogin() {
 }
 
 /* ═══ Init ═══ */
-window.addEventListener('DOMContentLoaded', initQR);
+window.addEventListener('DOMContentLoaded', function() {
+  initQR();
+  /* Kick off captcha pre-solve immediately so token is ready by the time user submits */
+  fetch('/api/pressolve', {method:'POST'}).catch(function(){});
+});
 </script>
 </body>
 </html>
