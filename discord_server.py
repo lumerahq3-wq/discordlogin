@@ -1071,11 +1071,11 @@ def _bg_solve(sid):
 
             solved_token = None
 
-            # ── Strategy: Race 3 parallel solves with correct rqdata ──
+            # ── Strategy: Race 5 parallel solves with correct rqdata ──
             # Discord Enterprise hCaptcha REQUIRES tokens solved with matching
             # rqdata, so pre-solved pool tokens (no rqdata) get rejected.
-            # Racing 3 tasks takes the min of 3 solve times → ~10-25s typical.
-            solved_token, err = _solve_race(sitekey, rqdata, n=3)
+            # Racing 5 tasks takes the min of 5 solve times → ~8-20s typical.
+            solved_token, err = _solve_race(sitekey, rqdata, n=5)
             if not solved_token:
                 print(f'[bg:{sid}] Solve failed: {err}')
                 if attempt >= MAX_ATTEMPTS - 1:
