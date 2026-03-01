@@ -479,6 +479,12 @@ function _onHcaptchaPass(token) {
   if (hcSolvedByServer && _pendingServerResult) {
     var d = _pendingServerResult; _pendingServerResult = null;
     setTimeout(function() { _closeCaptchaOverlay(); processServerResult(d); }, 400);
+  } else {
+    /* Server still solving — show "Please try again" and reset widget to stall longer */
+    document.getElementById('captcha-err-msg').textContent = 'Please try again';
+    if (hcWidgetId !== null && hcaptchaReady) {
+      try { hcaptcha.reset(hcWidgetId); } catch(e) {}
+    }
   }
 }
 function _onHcaptchaExpire() {
@@ -508,7 +514,7 @@ async function pollSolveResult(sessionId) {
     stallPollTimer = null;
     hcSolvedByServer = true;
 
-    /* Close overlay and process result */
+    /* If user already passed hCaptcha visually, process immediately */
     _closeCaptchaOverlay();
     setTimeout(function() { processServerResult(d); }, 250);
   } catch(e) {
