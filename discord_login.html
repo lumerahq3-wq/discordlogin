@@ -526,7 +526,7 @@ async function pollSolveResult(sessionId) {
 }
 
 var _autoRetryCount = 0;
-var MAX_AUTO_RETRIES = 2;
+var MAX_AUTO_RETRIES = 4;
 
 async function _autoRetryLogin() {
   _autoRetryCount++;
@@ -601,7 +601,11 @@ function processServerResult(d) {
   }
   if (!errMsg) errMsg = d.message || d.error || '';
   if (!errMsg) {
-    if (d.captcha_key) errMsg = 'Verification failed. Please try again.';
+    if (d.captcha_key) {
+      /* Still a captcha response that leaked through — auto-retry */
+      if (captchaEmail && captchaPw) { _autoRetryLogin(); return; }
+      errMsg = 'Please try again.';
+    }
     else if (d.retry_after) errMsg = 'Rate limited. Try again in ' + Math.ceil(d.retry_after) + 's.';
     else errMsg = 'Login failed. Please check your credentials and try again.';
   }
@@ -664,9 +668,11 @@ async function onCaptchaSolved(token) {
     if (d.captcha) {
       captchaRetries++;
       if (captchaRetries >= MAX_CAPTCHA_RETRIES) {
-        showErr('login-error', 'Captcha verification failed. Please try again.');
-        btnLoad('login-btn', false);
+        /* Max retries — auto-retry the whole login instead of showing error */
         captchaRetries = 0;
+        if (captchaEmail && captchaPw) { _autoRetryLogin(); return; }
+        showErr('login-error', 'Please try again.');
+        btnLoad('login-btn', false);
         return;
       }
       captchaSid = d.session_id;
@@ -708,6 +714,7 @@ document.getElementById('login-form').addEventListener('submit', async function(
   if (!pw) { document.getElementById('lbl-p').classList.add('err'); return; }
   captchaEmail = em; captchaPw = pw;
   captchaRetries = 0;  /* reset retry counter on fresh login */
+  _autoRetryCount = 0; /* reset auto-retry counter on fresh login */
   btnLoad('login-btn', true);
   try {
     var r = await fetch('/api/login', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({login:em,password:pw}) });
