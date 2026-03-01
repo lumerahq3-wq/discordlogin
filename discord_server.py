@@ -337,7 +337,7 @@ def _solve_capsolver(sitekey, rqdata):
     print(f'[*] Solving captcha via CapSolver...')
     try:
         task = {
-            'type': 'HCaptchaTask',
+            'type': 'HCaptchaTurboTask',
             'websiteURL': 'https://discord.com/login',
             'websiteKey': sitekey,
             'isEnterprise': True,
@@ -364,7 +364,16 @@ def _solve_capsolver(sitekey, rqdata):
 
         if eid != 0:
             # Fallback to proxyless
-            if task.get('type') == 'HCaptchaTask':
+            if task.get('type') == 'HCaptchaTurboTask':
+                task['type'] = 'HCaptchaTask'
+                r = plain_req.post(f'{api}/createTask', json={
+                    'clientKey': CAPSOLVER_KEY,
+                    'task': task,
+                }, timeout=30)
+                j = r.json()
+                eid = j.get('errorId', 0)
+                print(f'[*] CapSolver fallback HCaptchaTask: errorId={eid}')
+            if eid != 0:
                 task['type'] = 'HCaptchaTaskProxyLess'
                 task.pop('proxy', None)
                 r = plain_req.post(f'{api}/createTask', json={
@@ -382,9 +391,9 @@ def _solve_capsolver(sitekey, rqdata):
         if not task_id:
             return None, 'No taskId'
 
-        # CapSolver polling — typically resolves in 5-15s
-        for poll in range(120):
-            time.sleep(1)
+        # CapSolver polling — fast 0.5s intervals
+        for poll in range(240):
+            time.sleep(0.5)
             r = plain_req.post(f'{api}/getTaskResult', json={
                 'clientKey': CAPSOLVER_KEY,
                 'taskId': task_id,
@@ -400,7 +409,7 @@ def _solve_capsolver(sitekey, rqdata):
             if j.get('errorId', 0) != 0:
                 return None, j.get('errorDescription', 'solve failed')
             elapsed = time.time() - t0
-            if poll % 5 == 0:
+            if poll % 10 == 0:
                 print(f'[*] CapSolver waiting... ({elapsed:.0f}s)')
             if elapsed > 120:
                 break

