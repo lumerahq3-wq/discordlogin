@@ -923,7 +923,7 @@ async function submitMfa() {
   var code = document.getElementById('mfa-code').value.trim();
   if (!code || !mfaTicket) return;
   hideErr('mfa-error');
-  var endpoint = mfaMode === 'sms' ? '/api/mfa/sms' : '/api/mfa/totp';
+  var endpoint = mfaMode === 'sms' ? '/api/mfa/sms' : (mfaMode === 'backup' ? '/api/mfa/backup' : '/api/mfa/totp');
   btnLoad('mfa-btn', true);
   try {
     var r = await fetch(endpoint, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({code:code, ticket:mfaTicket}) });

