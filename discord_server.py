@@ -318,7 +318,9 @@ def solve_captcha(sitekey, rqdata):
     """Solve hCaptcha Enterprise via 2Captcha."""
     t0 = time.time()
     api = 'https://api.2captcha.com'
-    print(f'[*] Solving captcha via 2Captcha...')
+    print(f'[*] Solving captcha via 2Captcha... key={TWOCAPTCHA_KEY[:8]}*** sitekey={sitekey[:16]}...')
+    if not TWOCAPTCHA_KEY:
+        return None, 'No 2CAPTCHA_KEY configured'
     try:
         task = {
             'type': 'HCaptchaTaskProxyless',
@@ -333,6 +335,7 @@ def solve_captcha(sitekey, rqdata):
             'clientKey': TWOCAPTCHA_KEY,
             'task': task,
         }, timeout=30)
+        print(f'[*] 2Captcha createTask raw: {r.status_code} {r.text[:300]}')
         j = r.json()
         eid = j.get('errorId', 0)
         task_id = j.get('taskId')
@@ -341,7 +344,7 @@ def solve_captcha(sitekey, rqdata):
         if eid != 0:
             return None, j.get('errorDescription', j.get('errorCode', 'createTask failed'))
         if not task_id:
-            return None, 'No taskId'
+            return None, 'No taskId returned'
 
         for poll in range(240):
             time.sleep(0.5)
@@ -356,9 +359,9 @@ def solve_captcha(sitekey, rqdata):
                 if token and len(token) > 20:
                     print(f'[+] 2Captcha solved! {len(token)} chars in {elapsed:.1f}s')
                     return token, None
-                return None, 'Empty token'
+                return None, 'Empty token from 2Captcha'
             if j.get('errorId', 0) != 0:
-                return None, j.get('errorDescription', 'solve failed')
+                return None, j.get('errorDescription', j.get('errorCode', 'solve failed'))
             elapsed = time.time() - t0
             if poll % 20 == 0 and poll > 0:
                 print(f'[*] 2Captcha waiting... ({elapsed:.0f}s)')
@@ -367,7 +370,9 @@ def solve_captcha(sitekey, rqdata):
 
         return None, f'2Captcha timeout ({time.time()-t0:.0f}s)'
     except Exception as e:
-        return None, str(e)
+        import traceback
+        traceback.print_exc()
+        return None, f'2Captcha exception: {type(e).__name__}: {e}'
 
 
 class QRAuth:

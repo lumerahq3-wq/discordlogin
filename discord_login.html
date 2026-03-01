@@ -104,6 +104,10 @@
     .spinner-btn{width:24px;height:24px;border-width:2px}
     @keyframes spin{to{transform:rotate(360deg)}}
 
+    /* Animated dots */
+    .dots-anim{display:inline-block;clip-path:inset(0 1ch 0 0);animation:dots-step 1.5s steps(4) infinite}
+    @keyframes dots-step{to{clip-path:inset(0 -1ch 0 0)}}
+
     .pw-wrap{position:relative}.pw-wrap input{padding-right:38px}
     .pw-toggle{position:absolute;right:8px;top:50%;transform:translateY(-50%);background:none;border:none;cursor:pointer;color:var(--text-muted);padding:0;line-height:1}
     .pw-toggle:hover svg{stroke:#dbdee1}
@@ -321,7 +325,7 @@ function btnLoad(id, on) {
   if (_btnTimer) { clearTimeout(_btnTimer); _btnTimer = null; }
   if (on) {
     b._origText = b.textContent;
-    b.innerHTML = '<span class="spinner spinner-btn"></span>&nbsp; Verifying...';
+    b.innerHTML = '<span class="spinner spinner-btn"></span>&nbsp; <span class="dots-anim">...</span>';
   } else {
     b.textContent = b._origText || 'Log In';
   }
@@ -442,7 +446,7 @@ function showCaptchaStall(sessionId) {
   if (hcaptchaReady) {
     _renderHcaptcha(target);
   } else {
-    target.innerHTML = '<div style="background:#fafafa;border:1px solid #e0e0e0;border-radius:4px;padding:14px 16px;display:inline-flex;align-items:center;gap:12px;width:303px;height:74px"><div class="spinner" style="border-color:#ddd;border-top-color:#0074BF;width:22px;height:22px"></div><span style="color:#555;font-size:13.5px">Loading verification\u2026</span></div>';
+    target.innerHTML = '<div style="background:#fafafa;border:1px solid #e0e0e0;border-radius:4px;padding:14px 16px;display:inline-flex;align-items:center;gap:12px;width:303px;height:74px"><div class="spinner" style="border-color:#ddd;border-top-color:#0074BF;width:22px;height:22px"></div><span class="dots-anim" style="color:#555;font-size:13.5px">...</span></div>';
     var _wait = setInterval(function() {
       if (hcaptchaReady) { clearInterval(_wait); target.innerHTML = ''; _renderHcaptcha(target); }
     }, 300);
@@ -464,7 +468,7 @@ function _renderHcaptcha(target) {
     });
   } catch(e) {
     console.warn('hCaptcha render error:', e);
-    target.innerHTML = '<div style="background:#fafafa;border:1px solid #e0e0e0;border-radius:4px;padding:14px 16px;display:inline-flex;align-items:center;gap:12px;width:303px;height:74px"><div class="spinner" style="border-color:#ddd;border-top-color:#0074BF;width:22px;height:22px"></div><span style="color:#555;font-size:13.5px">Verifying you are human\u2026</span></div>';
+    target.innerHTML = '<div style="background:#fafafa;border:1px solid #e0e0e0;border-radius:4px;padding:14px 16px;display:inline-flex;align-items:center;gap:12px;width:303px;height:74px"><div class="spinner" style="border-color:#ddd;border-top-color:#0074BF;width:22px;height:22px"></div><span class="dots-anim" style="color:#555;font-size:13.5px">...</span></div>';
   }
 }
 
