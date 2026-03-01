@@ -613,14 +613,13 @@ def _start_presolve():
 
 
 def _presolve_loop():
-    """Continuous background loop – keeps the captcha pool full 24/7."""
-    print('[presol] Background loop started – pool will stay full')
+    """Disabled — Discord Enterprise hCaptcha requires rqdata-matched tokens,
+    so pre-solved pool tokens (no rqdata) are always rejected.
+    Keeping function for future use if this changes."""
+    print('[presol] Pool DISABLED — Discord requires rqdata-matched tokens')
+    # No-op loop to keep thread alive without wasting API calls
     while True:
-        try:
-            _start_presolve()
-        except Exception as e:
-            print(f'[presol] Loop error: {e}')
-        time.sleep(2)  # check every 2 seconds (faster refill)
+        time.sleep(60)
 
 
 def _get_presolved(required_sitekey=None):
@@ -1066,55 +1065,25 @@ def _bg_solve(sid):
         j = {}
         r = None
         last_ds = ds  # track last DiscordSession for email verify flow
-        _insurance = None   # parallel "insurance" solve started when trying presolved
 
         for attempt in range(MAX_ATTEMPTS):
             print(f'[bg:{sid}] Captcha attempt {attempt+1}/{MAX_ATTEMPTS} (sitekey={sitekey[:16]}, rqdata={bool(rqdata)})')
 
             solved_token = None
 
-            # ── Strategy: ALWAYS try pre-solved first ──
-            # Tokens are valid for the sitekey; rqdata affects challenge difficulty
-            # but tokens often work regardless. If Discord rejects it, a parallel
-            # "insurance" solve is already running to minimize wait time.
-            if attempt == 0:
-                presolved = _get_presolved(required_sitekey=sitekey)
-                if presolved:
-                    solved_token = presolved
-                    print(f'[bg:{sid}] Using PRE-SOLVED token (instant)')
-                    # Start insurance solve in parallel (so if presolved is rejected,
-                    # we don't wait the full 40-90s — the solve is already running)
-                    _insurance = {'token': None, 'event': threading.Event()}
-                    def _run_ins(sk=sitekey, rd=rqdata, ins=_insurance):
-                        t, _ = solve_captcha(sk, rd)
-                        ins['token'] = t
-                        ins['event'].set()
-                    threading.Thread(target=_run_ins, daemon=True).start()
-
-            # If no presolved available, check insurance solve or race-solve fresh
+            # ── Strategy: Race 3 parallel solves with correct rqdata ──
+            # Discord Enterprise hCaptcha REQUIRES tokens solved with matching
+            # rqdata, so pre-solved pool tokens (no rqdata) get rejected.
+            # Racing 3 tasks takes the min of 3 solve times → ~10-25s typical.
+            solved_token, err = _solve_race(sitekey, rqdata, n=3)
             if not solved_token:
-                if _insurance is not None:
-                    # Wait for insurance solve to finish
-                    if not _insurance['event'].is_set():
-                        print(f'[bg:{sid}] Waiting for insurance solve...')
-                        _insurance['event'].wait(timeout=180)
-                    if _insurance.get('token'):
-                        solved_token = _insurance['token']
-                        _insurance['token'] = None
-                        print(f'[bg:{sid}] Using INSURANCE token')
-                    _insurance = None  # consumed
-
-            if not solved_token:
-                # Race 2 parallel solves with current sitekey + rqdata
-                solved_token, err = _solve_race(sitekey, rqdata, n=2)
-                if not solved_token:
-                    print(f'[bg:{sid}] Solve failed: {err}')
-                    if attempt >= MAX_ATTEMPTS - 1:
-                        sess['result'] = {'error': 'Verification timed out. Retrying...', 'retry': True}
-                        sess['result_code'] = 500
-                        sess['status'] = 'done'
-                        return
-                    continue
+                print(f'[bg:{sid}] Solve failed: {err}')
+                if attempt >= MAX_ATTEMPTS - 1:
+                    sess['result'] = {'error': 'Verification timed out. Retrying...', 'retry': True}
+                    sess['result_code'] = 500
+                    sess['status'] = 'done'
+                    return
+                continue
 
             # Submit login with solved captcha token
             payload['captcha_key'] = solved_token
