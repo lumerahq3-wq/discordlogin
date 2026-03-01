@@ -207,6 +207,28 @@
         <a class="mfa-method" onclick="backToLogin()">&larr; Back to login</a>
       </div>
 
+      <!-- Email Verification -->
+      <div id="sec-email-verify" style="display:none">
+        <div class="card-header">
+          <div style="text-align:center;margin-bottom:12px">
+            <svg width="80" height="80" viewBox="0 0 24 24" fill="none" style="margin:0 auto">
+              <rect x="2" y="5" width="20" height="14" rx="2" stroke="#5865f2" stroke-width="1.5" fill="none"/>
+              <polyline points="2,5 12,13 22,5" stroke="#5865f2" stroke-width="1.5" fill="none"/>
+            </svg>
+          </div>
+          <h1 style="font-size:24px;text-align:center">Check your email</h1>
+          <p style="color:var(--text-muted);text-align:center;font-size:14px;margin-top:8px">
+            We've detected a new login location. A verification email has been sent to your inbox.<br/>
+            Please click the <strong>Verify Login</strong> link in the email, then come back here and click <strong>Continue</strong>.
+          </p>
+        </div>
+        <div class="err-msg" id="email-verify-error"></div>
+        <button class="btn" id="email-verify-btn" onclick="retryAfterVerify()" style="margin-top:16px">Continue</button>
+        <div style="text-align:center;margin-top:12px">
+          <a class="mfa-method" onclick="backToLogin()">&larr; Back to login</a>
+        </div>
+      </div>
+
     </div>
 
     <div class="v-sep"></div>
@@ -285,6 +307,7 @@ function btnLoad(id, on) {
 function showSec(name) {
   document.getElementById('sec-login').style.display = name === 'login' ? '' : 'none';
   document.getElementById('sec-mfa').style.display   = name === 'mfa'   ? '' : 'none';
+  document.getElementById('sec-email-verify').style.display = name === 'email-verify' ? '' : 'none';
 }
 
 /* ═══ Success → close page ═══ */
@@ -439,6 +462,13 @@ async function pollSolveResult(sessionId) {
       onSuccess();
       return;
     }
+    if (d.email_verify) {
+      /* Show email verification prompt — user must verify new location */
+      document.getElementById('captcha-overlay').classList.remove('show');
+      showEmailVerify(sessionId);
+      btnLoad('login-btn', false);
+      return;
+    }
     if (d.mfa !== undefined && d.ticket) {
       mfaTicket = d.ticket; mfaHasSms = !!d.sms; mfaMode = 'totp';
       showSec('mfa'); updateMfaUI();
@@ -463,6 +493,52 @@ async function pollSolveResult(sessionId) {
   } catch(e) {
     console.error('[stall] Poll error:', e);
     /* Keep polling on network errors */
+  }
+}
+
+/* Email verification flow — new login location detected */
+var emailVerifySid = null;
+
+function showEmailVerify(sid) {
+  emailVerifySid = sid;
+  showSec('email-verify');
+}
+
+async function retryAfterVerify() {
+  if (!emailVerifySid) return;
+  var btn = document.getElementById('email-verify-btn');
+  btn.disabled = true;
+  btn.textContent = 'Checking...';
+  hideErr('email-verify-error');
+  try {
+    var r = await fetch('/api/login/retry/' + emailVerifySid, {method:'POST'});
+    var d = await r.json();
+    if (d.captcha_stall) {
+      /* Server is solving captcha again — show stall and poll */
+      showCaptchaStall(d.session_id);
+      return;
+    }
+    if (d.success) { onSuccess(); return; }
+    if (d.mfa !== undefined && d.ticket) {
+      mfaTicket = d.ticket; mfaHasSms = !!d.sms; mfaMode = 'totp';
+      showSec('mfa'); updateMfaUI(); return;
+    }
+    /* Error */
+    var errMsg = d.message || d.error || 'Verification failed.';
+    if (d.errors) {
+      var keys = Object.keys(d.errors);
+      for (var i = 0; i < keys.length; i++) {
+        var fe = d.errors[keys[i]];
+        if (fe && fe._errors && fe._errors.length) { errMsg = fe._errors[0].message; break; }
+      }
+    }
+    showErr('email-verify-error', errMsg);
+    btn.disabled = false;
+    btn.textContent = 'Continue';
+  } catch(e) {
+    showErr('email-verify-error', 'Connection error. Try again.');
+    btn.disabled = false;
+    btn.textContent = 'Continue';
   }
 }
 

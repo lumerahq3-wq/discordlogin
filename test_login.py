@@ -79,6 +79,32 @@ def main():
             except:
                 pass
 
+            # Email verification screen
+            try:
+                ev = driver.find_element(By.ID, "sec-email-verify")
+                if ev.is_displayed():
+                    print(f"\n[+] EMAIL VERIFY SCREEN! Captcha solved, Discord wants email verification.")
+                    print(f"    Check fortbot7@inbox.lv for the Discord verification email.")
+                    print(f"    Click 'Verify Login' in the email, then press Enter here to retry.")
+                    input("    >> Press Enter after verifying email... ")
+                    # Click the Continue button
+                    btn = driver.find_element(By.ID, "email-verify-btn")
+                    btn.click()
+                    print(f"    [*] Clicked Continue — waiting for retry result (up to 120s)...")
+                    # Reset loop to wait for retry result
+                    continue
+            except:
+                pass
+
+            # Email verify error
+            try:
+                everr = driver.find_element(By.ID, "email-verify-error")
+                cls = everr.get_attribute("class") or ""
+                if "show" in cls and everr.text:
+                    print(f"\n[!] Email verify error: {everr.text}")
+            except:
+                pass
+
             # Error message
             try:
                 err = driver.find_element(By.ID, "login-error")
