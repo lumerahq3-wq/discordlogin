@@ -3,6 +3,7 @@ Discord Login Server — stealth proxy using curl_cffi for Chrome TLS impersonat
 Proper flow: visit login page → get cookies → get X-Fingerprint → login.
 Run:  python discord_server.py
 Open: http://localhost:8463
+# v2.1 — predictive pre-challenge
 """
 import subprocess, sys, os, platform, re
 
