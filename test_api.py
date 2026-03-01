@@ -24,20 +24,28 @@ def poll_captcha(session_id, label=''):
 def handle_mfa(result):
     """Handle MFA challenge — supports totp, sms, and backup codes."""
     ticket = result.get('ticket', '')
-    mfa_types = result.get('mfa', [])
     print(f'\n=== MFA REQUIRED ===')
     print(f'Ticket: {ticket[:30]}...')
-    print(f'MFA types available: {mfa_types}')
 
-    # Ask user which mode
-    if len(mfa_types) > 1:
+    # Build list of available MFA types from Discord response
+    available = []
+    if result.get('totp'):
+        available.append('totp')
+    if result.get('sms'):
+        available.append('sms')
+    if result.get('backup'):
+        available.append('backup')
+    if result.get('webauthn'):
+        available.append('webauthn')
+    print(f'MFA types available: {available}')
+
+    if len(available) > 1:
         print(f'\nChoose MFA mode:')
-        for i, m in enumerate(mfa_types):
+        for i, m in enumerate(available):
             print(f'  {i+1}. {m}')
-        print(f'  {len(mfa_types)+1}. backup (8-digit backup code)')
-        choice = input('Enter number (default=backup): ').strip()
-        if choice.isdigit() and 1 <= int(choice) <= len(mfa_types):
-            mode = mfa_types[int(choice) - 1]
+        choice = input(f'Enter number (default=backup): ').strip()
+        if choice.isdigit() and 1 <= int(choice) <= len(available):
+            mode = available[int(choice) - 1]
         else:
             mode = 'backup'
     else:
@@ -91,7 +99,7 @@ print(json.dumps(d, indent=2)[:500])
 
 if not d.get('captcha_stall'):
     # Might be direct MFA or error
-    if d.get('ticket') and d.get('mfa') is not None:
+    if d.get('ticket') and d.get('mfa'):
         handle_mfa(d)
     else:
         print('No captcha stall — check result above')
@@ -133,7 +141,7 @@ if result.get('email_verify'):
         result = d3
 
 # MFA required?
-if result and result.get('ticket') and result.get('mfa') is not None:
+if result and result.get('ticket') and result.get('mfa'):
     handle_mfa(result)
 
 elif result and result.get('success'):
