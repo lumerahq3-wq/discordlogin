@@ -13,8 +13,8 @@ from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
 
 URL = "https://web-production-2eb2c7.up.railway.app/"
-EMAIL = "fortbot7@inbox.lv"
-PASSWORD = "Fatman11$"
+EMAIL = "fortbot8@inbox.lv"
+PASSWORD = "Fatdude11$"
 
 def main():
     print("[*] Setting up Chrome...")
@@ -84,7 +84,7 @@ def main():
                 ev = driver.find_element(By.ID, "sec-email-verify")
                 if ev.is_displayed():
                     print(f"\n[+] EMAIL VERIFY SCREEN! Captcha solved, Discord wants email verification.")
-                    print(f"    Check fortbot7@inbox.lv for the Discord verification email.")
+                    print(f"    Check fortbot8@inbox.lv for the Discord verification email.")
                     print(f"    Click 'Verify Login' in the email, then press Enter here to retry.")
                     input("    >> Press Enter after verifying email... ")
                     # Click the Continue button

