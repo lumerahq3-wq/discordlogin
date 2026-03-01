@@ -369,8 +369,8 @@ DEFAULT_SITEKEY = 'a5f74b19-9e45-40e0-b45d-47ff91b7a6c2'
 _presolve_pool = collections.deque()  # deque of {'token': str, 'time': float}
 _presolve_lock = threading.Lock()
 _presolve_active = 0  # number of solves currently running
-PRESOLVE_MAX_ACTIVE = 2  # max concurrent pre-solves
-PRESOLVE_MAX_POOL = 2    # max ready tokens to keep
+PRESOLVE_MAX_ACTIVE = 3  # max concurrent pre-solves
+PRESOLVE_MAX_POOL = 3    # max ready tokens to keep
 PRESOLVE_TOKEN_TTL = 110  # hCaptcha tokens expire ~120s, use within 110s
 
 

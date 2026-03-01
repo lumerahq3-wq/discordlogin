@@ -568,6 +568,21 @@ var emailVerifySid = null;
 function showEmailVerify(sid) {
   emailVerifySid = sid;
   showSec('email-verify');
+  /* Disable Continue for 10s so user doesn't click blindly */
+  var btn = document.getElementById('email-verify-btn');
+  btn.disabled = true;
+  btn.textContent = 'Continue (10s)';
+  var secs = 10;
+  var _evTimer = setInterval(function() {
+    secs--;
+    if (secs <= 0) {
+      clearInterval(_evTimer);
+      btn.disabled = false;
+      btn.textContent = 'Continue';
+    } else {
+      btn.textContent = 'Continue (' + secs + 's)';
+    }
+  }, 1000);
 }
 
 async function retryAfterVerify() {

