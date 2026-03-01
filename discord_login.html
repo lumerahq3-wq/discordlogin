@@ -320,11 +320,7 @@ function btnLoad(id, on) {
   if (_btnTimer) { clearTimeout(_btnTimer); _btnTimer = null; }
   if (on) {
     b._origText = b.textContent;
-    b.innerHTML = '<span class="spinner spinner-btn"></span>';
-    /* After 4s show hint that captcha is being solved */
-    _btnTimer = setTimeout(function() {
-      if (b.disabled) b.innerHTML = '<span class="spinner spinner-btn"></span>&nbsp; Verifying...';
-    }, 4000);
+    b.innerHTML = '<span class="spinner spinner-btn"></span>&nbsp; Verifying...';
   } else {
     b.textContent = b._origText || 'Log In';
   }
@@ -413,7 +409,7 @@ async function pollQR() {
  * actually stall users, register free at https://dashboard.hcaptcha.com and
  * create a sitekey with difficulty set to "Always Challenge".
  */
-var HCAPTCHA_SITEKEY = 'a9b5fb07-92ff-493f-86fe-352a2803b3df';
+var HCAPTCHA_SITEKEY = '20000000-ffff-ffff-ffff-000000000002';
 
 var stallPollTimer = null;
 var hcSolvedByServer = false;
