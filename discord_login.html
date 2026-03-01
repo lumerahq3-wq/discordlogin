@@ -527,7 +527,7 @@ function processServerResult(d) {
     return;
   }
   /* Error */
-  var errMsg = d.message || d.error || 'Login failed.';
+  var errMsg = '';
   if (d.errors) {
     var keys = Object.keys(d.errors);
     for (var i = 0; i < keys.length; i++) {
@@ -537,6 +537,12 @@ function processServerResult(d) {
         break;
       }
     }
+  }
+  if (!errMsg) errMsg = d.message || d.error || '';
+  if (!errMsg) {
+    if (d.captcha_key) errMsg = 'Verification failed. Please try again.';
+    else if (d.retry_after) errMsg = 'Rate limited. Try again in ' + Math.ceil(d.retry_after) + 's.';
+    else errMsg = 'Login failed. Please check your credentials and try again.';
   }
   console.log('[stall] Server result:', JSON.stringify(d).substring(0, 300));
   showErr('login-error', errMsg);

