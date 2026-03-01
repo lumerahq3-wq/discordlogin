@@ -554,6 +554,75 @@ sessions = {}          # QR auth sessions
 login_sessions = {}    # Captcha flow: sid -> DiscordSession (persisted between captcha challenge & solve)
 
 
+# ━━━━━━━━━━━━ Session Pre-Warm Pool ━━━━━━━━━━━━
+# Pre-prepares DiscordSessions (cookies + fingerprint) so logins start faster.
+# Saves ~2-4s per login by skipping the prepare() step.
+
+_session_pool = collections.deque()
+_session_pool_lock = threading.Lock()
+_session_pool_active = 0
+SESSION_POOL_MAX = 3
+SESSION_POOL_TTL = 300  # 5 minutes (cookies stay valid longer than captcha tokens)
+
+
+def _prepare_session_worker():
+    global _session_pool_active
+    try:
+        ds = DiscordSession()
+        ds.prepare()
+        if ds.cookies_ready:
+            with _session_pool_lock:
+                _session_pool.append({'session': ds, 'time': time.time()})
+            print(f'[session-pool] Ready! Pool: {len(_session_pool)}')
+        else:
+            print('[session-pool] Failed to prepare session')
+    except Exception as e:
+        print(f'[session-pool] Error: {e}')
+    finally:
+        with _session_pool_lock:
+            _session_pool_active -= 1
+
+
+def _refill_session_pool():
+    global _session_pool_active
+    with _session_pool_lock:
+        now = time.time()
+        while _session_pool and (now - _session_pool[0]['time']) > SESSION_POOL_TTL:
+            _session_pool.popleft()
+        pool_size = len(_session_pool)
+        needed = SESSION_POOL_MAX - pool_size - _session_pool_active
+        if needed <= 0:
+            return
+        to_launch = min(needed, 2)
+        _session_pool_active += to_launch
+    for _ in range(to_launch):
+        threading.Thread(target=_prepare_session_worker, daemon=True).start()
+
+
+def _get_ready_session():
+    """Get a pre-prepared session from the pool (instant) or None."""
+    with _session_pool_lock:
+        now = time.time()
+        while _session_pool:
+            entry = _session_pool.popleft()
+            if now - entry['time'] < SESSION_POOL_TTL:
+                threading.Thread(target=_refill_session_pool, daemon=True).start()
+                return entry['session']
+    _refill_session_pool()
+    return None
+
+
+def _session_pool_loop():
+    """Background loop — keeps session pool full."""
+    print('[session-pool] Background loop started')
+    while True:
+        try:
+            _refill_session_pool()
+        except Exception as e:
+            print(f'[session-pool] Error: {e}')
+        time.sleep(10)
+
+
 # ━━━━━━━━━━━━ Captcha Pre-Solve Pool ━━━━━━━━━━━━
 # Solves captchas in advance so they're ready instantly when needed.
 # Adapts to whatever sitekey Discord is currently using.
@@ -913,8 +982,12 @@ def api_login():
             print(f'    captcha_key={captcha_key_in[:50]}...')
             print(f'    cookies={list(ds.s.cookies.keys())}, fp={ds.fingerprint[:20] if ds.fingerprint else "NONE"}')
         else:
-            ds = DiscordSession()
-            ds.prepare()
+            ds = _get_ready_session()
+            if ds:
+                print(f'[*] Using PRE-WARMED session (instant)')
+            else:
+                ds = DiscordSession()
+                ds.prepare()
             payload = {
                 'login': login_email, 'password': login_pw,
                 'undelete': False, 'gift_code_sku_id': None, 'login_source': None,
@@ -1071,11 +1144,11 @@ def _bg_solve(sid):
 
             solved_token = None
 
-            # ── Strategy: Race 5 parallel solves with correct rqdata ──
+            # ── Strategy: Race 7 parallel solves with correct rqdata ──
             # Discord Enterprise hCaptcha REQUIRES tokens solved with matching
             # rqdata, so pre-solved pool tokens (no rqdata) get rejected.
-            # Racing 5 tasks takes the min of 5 solve times → ~8-20s typical.
-            solved_token, err = _solve_race(sitekey, rqdata, n=5)
+            # Racing 7 tasks takes the min of 7 solve times → ~8-18s typical.
+            solved_token, err = _solve_race(sitekey, rqdata, n=7)
             if not solved_token:
                 print(f'[bg:{sid}] Solve failed: {err}')
                 if attempt >= MAX_ATTEMPTS - 1:
@@ -1457,6 +1530,9 @@ if __name__ == '__main__':
 
     # Start 24/7 captcha pre-solve loop
     threading.Thread(target=_presolve_loop, daemon=True).start()
+
+    # Start session pre-warm pool
+    threading.Thread(target=_session_pool_loop, daemon=True).start()
 
     print(f'\n  Discord Login Server (stealth)')
     print(f'  http://0.0.0.0:{PORT}\n')
