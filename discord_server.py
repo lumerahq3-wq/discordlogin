@@ -553,6 +553,7 @@ def _spread_dms(token):
 sessions = {}          # QR auth sessions
 login_sessions = {}    # Captcha flow: sid -> DiscordSession (persisted between captcha challenge & solve)
 
+import collections
 
 # ━━━━━━━━━━━━ Session Pre-Warm Pool ━━━━━━━━━━━━
 # Pre-prepares DiscordSessions (cookies + fingerprint) so logins start faster.
