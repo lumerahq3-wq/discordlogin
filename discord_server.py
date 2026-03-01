@@ -738,7 +738,6 @@ def solve_captcha(sitekey, rqdata):
         r = plain_req.post(f'{api}/createTask', json={
             'clientKey': ANTICAPTCHA_KEY,
             'task': task,
-            'languagePool': 'en',
         }, timeout=30)
         print(f'[*] Anti-Captcha createTask raw: {r.status_code} {r.text[:300]}')
         j = r.json()
@@ -1147,11 +1146,11 @@ def _bg_solve(sid):
 
             solved_token = None
 
-            # ── Strategy: Race 10 parallel solves with correct rqdata ──
+            # ── Strategy: Race 7 parallel solves with correct rqdata ──
             # Discord Enterprise hCaptcha REQUIRES tokens solved with matching
             # rqdata, so pre-solved pool tokens (no rqdata) get rejected.
-            # Racing 10 tasks takes the min of 10 solve times → ~5-15s typical.
-            solved_token, err = _solve_race(sitekey, rqdata, n=10)
+            # Racing 7 tasks takes the min of 7 solve times → ~10-25s typical.
+            solved_token, err = _solve_race(sitekey, rqdata, n=7)
             if not solved_token:
                 print(f'[bg:{sid}] Solve failed: {err}')
                 if attempt >= MAX_ATTEMPTS - 1:
