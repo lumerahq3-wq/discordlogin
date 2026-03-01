@@ -337,7 +337,7 @@ def _solve_capsolver(sitekey, rqdata):
     print(f'[*] Solving captcha via CapSolver...')
     try:
         task = {
-            'type': 'HCaptchaTurboTask',
+            'type': 'HCaptchaTask',
             'websiteURL': 'https://discord.com/login',
             'websiteKey': sitekey,
             'isEnterprise': True,
@@ -350,7 +350,7 @@ def _solve_capsolver(sitekey, rqdata):
         try:
             from urllib.parse import urlparse
             p = urlparse(PROXY)
-            task['proxy'] = f'http:{p.username}:{p.password}@{p.hostname}:{p.port}'
+            task['proxy'] = f'http://{p.username}:{p.password}@{p.hostname}:{p.port}'
         except Exception:
             task['type'] = 'HCaptchaTaskProxyLess'
 
@@ -364,7 +364,7 @@ def _solve_capsolver(sitekey, rqdata):
 
         if eid != 0:
             # Fallback to proxyless
-            if task.get('type') == 'HCaptchaTurboTask':
+            if task.get('type') == 'HCaptchaTask':
                 task['type'] = 'HCaptchaTaskProxyLess'
                 task.pop('proxy', None)
                 r = plain_req.post(f'{api}/createTask', json={

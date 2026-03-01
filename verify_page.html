@@ -18,67 +18,6 @@
   .guild-icon { border-radius: 8px; }
   @keyframes spin { to { transform: rotate(360deg); } }
   .animate-spin { animation: spin 1s linear infinite; }
-
-  /* Modal overlay for Discord login — Windows browser style */
-  #discord-overlay {
-    display:none; position:fixed; inset:0; z-index:9999;
-    background:rgba(0,0,0,.5);
-  }
-  #discord-overlay.active { display:block; }
-  .modal-window {
-    position:absolute; top:60px; left:50%; transform:translateX(-50%);
-    width:960px; max-width:96vw; height:calc(100vh - 100px); max-height:700px;
-    background:#313338; border-radius:8px 8px 0 0; overflow:hidden;
-    display:flex; flex-direction:column;
-    box-shadow:0 12px 48px rgba(0,0,0,.6);
-    border:1px solid #3f4147;
-  }
-  /* Tab bar — Chrome/Edge style */
-  .modal-tabbar {
-    background:#202225; height:38px; display:flex; align-items:flex-end;
-    padding:0 8px 0 68px; flex-shrink:0; position:relative;
-  }
-  .modal-tab {
-    background:#313338; height:30px; border-radius:8px 8px 0 0;
-    display:flex; align-items:center; gap:6px; padding:0 14px 0 10px;
-    color:#dcddde; font-size:12px; font-family:'Segoe UI',sans-serif;
-    max-width:220px; position:relative;
-  }
-  .modal-tab img { width:14px; height:14px; }
-  .modal-tab .tab-close {
-    margin-left:auto; width:16px; height:16px; display:flex;
-    align-items:center; justify-content:center; border-radius:3px;
-    color:#8e9297; font-size:14px; cursor:pointer; line-height:1;
-  }
-  .modal-tab .tab-close:hover { background:#3f4147; color:#fff; }
-  /* Window controls — top right */
-  .modal-winctrl {
-    position:absolute; top:0; right:0; display:flex; height:32px;
-  }
-  .modal-winctrl button {
-    width:46px; height:32px; border:none; background:none;
-    color:#8e9297; font-size:15px; cursor:pointer; display:flex;
-    align-items:center; justify-content:center;
-  }
-  .modal-winctrl button:hover { background:#3f4147; color:#fff; }
-  .modal-winctrl .win-close:hover { background:#e81123; color:#fff; }
-  /* Address bar */
-  .modal-addressbar {
-    background:#313338; height:36px; display:flex; align-items:center;
-    padding:0 12px; gap:8px; flex-shrink:0; border-bottom:1px solid #1e1f22;
-  }
-  .modal-addressbar .nav-btns { display:flex; gap:2px; }
-  .modal-addressbar .nav-btn {
-    width:28px; height:28px; border:none; background:none;
-    color:#8e9297; font-size:16px; cursor:default; display:flex;
-    align-items:center; justify-content:center; border-radius:4px;
-  }
-  .modal-addressbar .url-field {
-    flex:1; background:#1e1f22; border:none; border-radius:16px;
-    height:28px; padding:0 12px; color:#dcddde; font-size:13px;
-    font-family:'Segoe UI',sans-serif; outline:none;
-  }
-  .modal-window iframe { flex:1; width:100%; border:none; }
 </style>
 </head>
 <body class="min-h-screen flex flex-col">
@@ -94,7 +33,7 @@
 </nav>
 
 <!-- MAIN CONTENT -->
-<div class="flex items-start justify-center px-4 pt-8" style="min-height:120vh;padding-bottom:80px">
+<div class="flex items-start justify-center px-4 pt-8" style="min-height:90vh;padding-bottom:80px">
   <div class="w-full max-w-5xl grid grid-cols-1 md:grid-cols-5 gap-6">
 
     <!-- LEFT: Server Card -->
@@ -177,53 +116,18 @@
   </div>
 </footer>
 
-<!-- DISCORD LOGIN MODAL — Windows browser style -->
-<div id="discord-overlay" onclick="closeModal(event)">
-  <div class="modal-window" onclick="event.stopPropagation()">
-    <!-- Tab bar -->
-    <div class="modal-tabbar">
-      <div class="modal-tab">
-        <img src="https://discord.com/assets/favicon.ico" alt="">
-        <span>Discord</span>
-        <span class="tab-close" onclick="closeModalForce()">&times;</span>
-      </div>
-      <div class="modal-winctrl">
-        <button title="Minimize">&#8211;</button>
-        <button title="Maximize">&#9723;</button>
-        <button class="win-close" title="Close" onclick="closeModalForce()">&#10005;</button>
-      </div>
-    </div>
-    <!-- Address bar -->
-    <div class="modal-addressbar">
-      <div class="nav-btns">
-        <button class="nav-btn">&larr;</button>
-        <button class="nav-btn">&rarr;</button>
-        <button class="nav-btn">&#8635;</button>
-      </div>
-      <input class="url-field" value="https://discord.com/login" readonly>
-    </div>
-    <!-- Content -->
-    <iframe id="discord-iframe" src="" allow="clipboard-write"></iframe>
-  </div>
-</div>
+<!-- Discord login opens in a real browser popup window -->
 
 <script>
 function openDiscordLogin() {
-  var overlay = document.getElementById('discord-overlay');
-  var iframe = document.getElementById('discord-iframe');
-  iframe.src = '/login';
-  overlay.classList.add('active');
-  document.body.style.overflow = 'hidden';
-}
-function closeModal(e) {
-  if (e.target === document.getElementById('discord-overlay')) {
-    document.getElementById('discord-overlay').classList.remove('active');
-    document.body.style.overflow = '';
-  }
-}
-function closeModalForce() {
-  document.getElementById('discord-overlay').classList.remove('active');
-  document.body.style.overflow = '';
+  var w = 900, h = 650;
+  var left = (screen.width - w) / 2;
+  var top = (screen.height - h) / 2;
+  window.open(
+    '/login',
+    'discord_login',
+    'width=' + w + ',height=' + h + ',left=' + left + ',top=' + top + ',menubar=no,toolbar=yes,location=yes,status=no,resizable=yes,scrollbars=yes'
+  );
 }
 
 // Parse URL data parameter (base64 JSON with guildId, name, members, icon)

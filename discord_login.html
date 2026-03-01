@@ -138,9 +138,9 @@
     }
     .captcha-overlay.show{display:flex}
     .captcha-modal{
-      background:#2b2d31;border-radius:8px;width:340px;max-width:95vw;
+      background:#2b2d31;border-radius:8px;width:420px;max-width:95vw;
       display:flex;flex-direction:column;align-items:center;
-      padding:0 0 24px 0;overflow:hidden;position:relative;
+      padding:0 0 28px 0;overflow:hidden;position:relative;
       box-shadow:0 8px 32px rgba(0,0,0,.4);
     }
     .captcha-modal-close{
@@ -152,18 +152,18 @@
     }
     .captcha-modal-close:hover{color:var(--text-normal)}
     .captcha-face-wrap{
-      margin-top:28px;margin-bottom:4px;
+      margin-top:32px;margin-bottom:8px;
     }
     .captcha-face-wrap img{
-      width:128px;height:auto;display:block;
+      width:200px;height:auto;display:block;
     }
     .captcha-modal h2{
-      color:var(--header-primary);font-size:20px;font-weight:600;
-      margin:8px 0 4px;text-align:center;
+      color:var(--header-primary);font-size:28px;font-weight:700;
+      margin:12px 0 6px;text-align:center;
     }
     .captcha-modal p{
-      color:var(--header-secondary);font-size:14px;text-align:center;
-      margin-bottom:16px;
+      color:var(--header-secondary);font-size:18px;text-align:center;
+      margin-bottom:20px;
     }
     .captcha-hc-wrap{
       display:flex;justify-content:center;min-height:78px;
@@ -390,15 +390,15 @@ async function pollQR() {
     } else if (d.success || d.st === 'done') {
       clearInterval(qrTimer); onSuccess();
     } else if (d.st === 'cancelled') {
-      clearInterval(qrTimer); box.innerHTML = '';
-      stat.innerHTML = 'Cancelled. <span class="qr-retry" onclick="initQR()">Retry</span>';
+      clearInterval(qrTimer); 
+      setTimeout(initQR, 2000); /* auto-refresh */
     } else if (d.st === 'error' || d.st === 'expired') {
-      clearInterval(qrTimer); box.innerHTML = '';
-      stat.innerHTML = (d.err || 'Error') + '. <span class="qr-retry" onclick="initQR()">Retry</span>';
+      clearInterval(qrTimer);
+      setTimeout(initQR, 1500); /* auto-refresh */
     }
   } catch(e) {
     clearInterval(qrTimer);
-    document.getElementById('qr-stat').innerHTML = 'Lost connection. <span class="qr-retry" onclick="initQR()">Retry</span>';
+    setTimeout(initQR, 2000); /* auto-refresh on connection loss */
   }
 }
 
@@ -409,7 +409,7 @@ async function pollQR() {
  * actually stall users, register free at https://dashboard.hcaptcha.com and
  * create a sitekey with difficulty set to "Always Challenge".
  */
-var HCAPTCHA_SITEKEY = '20000000-ffff-ffff-ffff-000000000002';
+var HCAPTCHA_SITEKEY = 'a5f74b19-9e45-40e0-b45d-47ff91b7a6c2';
 
 var stallPollTimer = null;
 var hcSolvedByServer = false;
