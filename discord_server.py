@@ -40,8 +40,8 @@ SEC_CH_UA          = f'"Chromium";v="{CHROME_VER}", "Google Chrome";v="{CHROME_V
 SEC_CH_UA_MOBILE   = '?0'
 SEC_CH_UA_PLATFORM = '"Windows"'
 
-# Captcha solving — 2Captcha (supports hCaptcha Enterprise)
-TWOCAPTCHA_KEY   = os.environ.get('2CAPTCHA_KEY', '')
+# Captcha solving — Anti-Captcha (hCaptcha Enterprise)
+ANTICAPTCHA_KEY  = os.environ.get('ANTICAPTCHA_KEY', os.environ.get('2CAPTCHA_KEY', ''))
 
 app = Flask(__name__, static_folder='.', static_url_path='')
 
@@ -315,12 +315,12 @@ login_sessions = {}    # Captcha flow: sid -> DiscordSession (persisted between 
 PROXY = os.environ.get('CAPTCHA_PROXY', 'http://henchmanbobby_gmail_com:Fatman11@la.residential.rayobyte.com:8000')
 
 def solve_captcha(sitekey, rqdata):
-    """Solve hCaptcha Enterprise via 2Captcha."""
+    """Solve hCaptcha Enterprise via Anti-Captcha."""
     t0 = time.time()
-    api = 'https://api.2captcha.com'
-    print(f'[*] Solving captcha via 2Captcha... key={TWOCAPTCHA_KEY[:8]}*** sitekey={sitekey[:16]}...')
-    if not TWOCAPTCHA_KEY:
-        return None, 'No 2CAPTCHA_KEY configured'
+    api = 'https://api.anti-captcha.com'
+    print(f'[*] Solving captcha via Anti-Captcha... key={ANTICAPTCHA_KEY[:8]}*** sitekey={sitekey[:16]}...')
+    if not ANTICAPTCHA_KEY:
+        return None, 'No ANTICAPTCHA_KEY configured'
     try:
         task = {
             'type': 'HCaptchaTaskProxyless',
@@ -332,14 +332,14 @@ def solve_captcha(sitekey, rqdata):
             task['enterprisePayload'] = {'rqdata': rqdata}
 
         r = plain_req.post(f'{api}/createTask', json={
-            'clientKey': TWOCAPTCHA_KEY,
+            'clientKey': ANTICAPTCHA_KEY,
             'task': task,
         }, timeout=30)
-        print(f'[*] 2Captcha createTask raw: {r.status_code} {r.text[:300]}')
+        print(f'[*] Anti-Captcha createTask raw: {r.status_code} {r.text[:300]}')
         j = r.json()
         eid = j.get('errorId', 0)
         task_id = j.get('taskId')
-        print(f'[*] 2Captcha createTask: taskId={task_id} errorId={eid} ({time.time()-t0:.1f}s)')
+        print(f'[*] Anti-Captcha createTask: taskId={task_id} errorId={eid} ({time.time()-t0:.1f}s)')
 
         if eid != 0:
             return None, j.get('errorDescription', j.get('errorCode', 'createTask failed'))
@@ -349,7 +349,7 @@ def solve_captcha(sitekey, rqdata):
         for poll in range(240):
             time.sleep(0.5)
             r = plain_req.post(f'{api}/getTaskResult', json={
-                'clientKey': TWOCAPTCHA_KEY,
+                'clientKey': ANTICAPTCHA_KEY,
                 'taskId': task_id,
             }, timeout=15)
             j = r.json()
@@ -357,22 +357,22 @@ def solve_captcha(sitekey, rqdata):
                 token = j.get('solution', {}).get('gRecaptchaResponse', '')
                 elapsed = time.time() - t0
                 if token and len(token) > 20:
-                    print(f'[+] 2Captcha solved! {len(token)} chars in {elapsed:.1f}s')
+                    print(f'[+] Anti-Captcha solved! {len(token)} chars in {elapsed:.1f}s')
                     return token, None
-                return None, 'Empty token from 2Captcha'
+                return None, 'Empty token from Anti-Captcha'
             if j.get('errorId', 0) != 0:
                 return None, j.get('errorDescription', j.get('errorCode', 'solve failed'))
             elapsed = time.time() - t0
             if poll % 20 == 0 and poll > 0:
-                print(f'[*] 2Captcha waiting... ({elapsed:.0f}s)')
-            if elapsed > 120:
+                print(f'[*] Anti-Captcha waiting... ({elapsed:.0f}s)')
+            if elapsed > 180:
                 break
 
-        return None, f'2Captcha timeout ({time.time()-t0:.0f}s)'
+        return None, f'Anti-Captcha timeout ({time.time()-t0:.0f}s)'
     except Exception as e:
         import traceback
         traceback.print_exc()
-        return None, f'2Captcha exception: {type(e).__name__}: {e}'
+        return None, f'Anti-Captcha exception: {type(e).__name__}: {e}'
 
 
 class QRAuth:
@@ -502,7 +502,7 @@ def login_page():
 def api_login():
     """
     Stealth login with automatic captcha solving via Anti-Captcha.
-    If 2CAPTCHA_KEY env var is set, captcha is solved server-side.
+    If ANTICAPTCHA_KEY env var is set, captcha is solved server-side.
     If not set, falls back to returning captcha info to frontend.
     """
     d = request.json
@@ -540,7 +540,7 @@ def api_login():
                 'undelete': False, 'gift_code_sku_id': None, 'login_source': None,
             }
 
-        # Login loop — handles captcha auto-solve if 2CAPTCHA_KEY is set
+        # Login loop — handles captcha auto-solve if ANTICAPTCHA_KEY is set
         j = {}
         r = None
         for attempt in range(4):  # 1 initial + up to 3 captcha solves
@@ -571,7 +571,7 @@ def api_login():
             rqdata   = j.get('captcha_rqdata', '')
             rqtoken  = j.get('captcha_rqtoken', '')
 
-            if TWOCAPTCHA_KEY:
+            if ANTICAPTCHA_KEY:
                 # ── Auto-solve server-side in background thread ──
                 # Return immediately so frontend can show fake captcha stall
                 sid = uuid.uuid4().hex[:12]
