@@ -343,6 +343,8 @@ def solve_captcha(sitekey, rqdata):
         print(f'[*] createTask: taskId={j.get("taskId","?")} errorId={eid} ({time.time()-t0:.1f}s)')
 
         if eid != 0:
+            err_detail = f"errorId={eid} errorCode={j.get('errorCode','?')} desc={j.get('errorDescription','?')} full={j}"
+            print(f'[!] Anti-Captcha error: {err_detail}')
             return None, j.get('errorDescription', j.get('errorCode', 'createTask failed'))
 
         task_id = j.get('taskId')
@@ -493,6 +495,30 @@ def _qr_worker(s: QRAuth):
 @app.route('/')
 def index():
     return send_from_directory('.', 'discord_login.html')
+
+
+@app.route('/debug/captcha')
+def debug_captcha():
+    """Debug: test Anti-Captcha API from server environment."""
+    import json as _json
+    try:
+        r = plain_req.post('https://api.anti-captcha.com/createTask', json={
+            'clientKey': CAPTCHA_KEY,
+            'task': {
+                'type': 'HCaptchaTaskProxyless',
+                'websiteURL': 'https://discord.com/login',
+                'websiteKey': 'a9b5fb07-92ff-493f-86fe-352a2803b3df',
+                'isEnterprise': True,
+            }
+        }, timeout=30)
+        return jsonify({
+            'status_code': r.status_code,
+            'response': r.json(),
+            'captcha_key_used': CAPTCHA_KEY[:8] + '...',
+            'captcha_service': CAPTCHA_SERVICE,
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/api/login', methods=['POST'])
