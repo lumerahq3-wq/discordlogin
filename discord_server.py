@@ -40,9 +40,9 @@ SEC_CH_UA          = f'"Chromium";v="{CHROME_VER}", "Google Chrome";v="{CHROME_V
 SEC_CH_UA_MOBILE   = '?0'
 SEC_CH_UA_PLATFORM = '"Windows"'
 
-# Captcha solving (capsolver.com or 2captcha.com)
-CAPTCHA_KEY     = os.environ.get('CAPTCHA_KEY', 'dbfdba3b6d1a7c256969070e942687c1')
-CAPTCHA_SERVICE = os.environ.get('CAPTCHA_SERVICE', '2captcha')  # 'capsolver' or '2captcha'
+# Captcha solving (anti-captcha.com)
+CAPTCHA_KEY     = os.environ.get('CAPTCHA_KEY', 'b7a1846d602861ef723c924eee4de940')
+CAPTCHA_SERVICE = os.environ.get('CAPTCHA_SERVICE', 'anticaptcha')  # 'anticaptcha'
 
 app = Flask(__name__, static_folder='.', static_url_path='')
 
@@ -314,54 +314,44 @@ login_sessions = {}    # Captcha flow: sid -> DiscordSession (persisted between 
 
 
 def solve_captcha(sitekey, rqdata):
-    """Solve hcaptcha Enterprise challenge — capsolver (proxyless) or 2captcha."""
+    """Solve hcaptcha Enterprise challenge via Anti-Captcha (api.anti-captcha.com)."""
     if not CAPTCHA_KEY:
         return None, 'No CAPTCHA_KEY configured'
 
     t0 = time.time()
-    print(f'[*] Solving captcha via {CAPTCHA_SERVICE}...')
+    api_base = 'https://api.anti-captcha.com'
+    print(f'[*] Solving captcha via Anti-Captcha...')
 
-    if CAPTCHA_SERVICE == '2captcha':
-        api_base = 'https://api.2captcha.com'
+    try:
+        # Build task
         task = {
             'type': 'HCaptchaTaskProxyless',
             'websiteURL': 'https://discord.com/login',
             'websiteKey': sitekey,
-            'userAgent': UA,
-            'isEnterprise': True,
-        }
-        if rqdata:
-            task['enterprisePayload'] = {'rqdata': rqdata}
-    else:  # capsolver — enterprise proxyless (no proxy required)
-        api_base = 'https://api.capsolver.com'
-        task = {
-            'type': 'HCaptchaTaskProxyLess',
-            'websiteURL': 'https://discord.com/login',
-            'websiteKey': sitekey,
-            'userAgent': UA,
             'isEnterprise': True,
         }
         if rqdata:
             task['enterprisePayload'] = {'rqdata': rqdata}
 
-    try:
+        # Submit
         r = plain_req.post(f'{api_base}/createTask', json={
             'clientKey': CAPTCHA_KEY,
             'task': task,
         }, timeout=30)
         j = r.json()
-        print(f'[*] createTask: id={j.get("taskId", "?")} err={j.get("errorId",0)} desc={j.get("errorDescription","")} ({time.time()-t0:.1f}s)')
+        eid = j.get('errorId', 0)
+        print(f'[*] createTask: taskId={j.get("taskId","?")} errorId={eid} ({time.time()-t0:.1f}s)')
 
-        if j.get('errorId', 0) != 0:
-            return None, j.get('errorDescription', 'createTask failed')
+        if eid != 0:
+            return None, j.get('errorDescription', j.get('errorCode', 'createTask failed'))
 
         task_id = j.get('taskId')
         if not task_id:
             return None, 'No taskId in response'
 
-        # Aggressive polling — 1s intervals for speed
-        for poll in range(120):
-            time.sleep(1)
+        # Poll for result (5s intervals, up to 5 min)
+        for poll in range(60):
+            time.sleep(5)
             r = plain_req.post(f'{api_base}/getTaskResult', json={
                 'clientKey': CAPTCHA_KEY,
                 'taskId': task_id,
@@ -369,18 +359,18 @@ def solve_captcha(sitekey, rqdata):
             j = r.json()
 
             if j.get('status') == 'ready':
-                token = j.get('solution', {}).get('gRecaptchaResponse')
+                token = j.get('solution', {}).get('gRecaptchaResponse', '')
                 elapsed = time.time() - t0
-                if token:
+                if token and len(token) > 20:
                     print(f'[+] Captcha solved! {len(token)} chars in {elapsed:.1f}s')
                     return token, None
-                return None, 'No gRecaptchaResponse in solution'
+                return None, 'Empty token in solution'
 
             if j.get('errorId', 0) != 0:
                 return None, j.get('errorDescription', 'solve failed')
 
-            if poll % 5 == 0:
-                print(f'[*] Waiting... ({poll}s)')
+            if poll % 4 == 0:
+                print(f'[*] Waiting... ({poll * 5}s)')
 
         return None, f'Captcha solve timeout ({time.time()-t0:.0f}s)'
     except Exception as e:
