@@ -620,7 +620,7 @@ def _presolve_loop():
             _start_presolve()
         except Exception as e:
             print(f'[presol] Loop error: {e}')
-        time.sleep(3)  # check every 3 seconds (faster refill)
+        time.sleep(2)  # check every 2 seconds (faster refill)
 
 
 def _get_presolved(required_sitekey=None):
@@ -649,7 +649,7 @@ def _get_presolved(required_sitekey=None):
 PROXY = os.environ.get('CAPTCHA_PROXY', 'http://henchmanbobby_gmail_com:Fatman11@la.residential.rayobyte.com:8000')
 
 def solve_captcha(sitekey, rqdata):
-    """Solve hCaptcha Enterprise via Anti-Captcha."""
+    """Solve hCaptcha Enterprise via Anti-Captcha with adaptive polling."""
     t0 = time.time()
     api = 'https://api.anti-captcha.com'
     print(f'[*] Solving captcha via Anti-Captcha... key={ANTICAPTCHA_KEY[:8]}*** sitekey={sitekey[:16]}...')
@@ -680,8 +680,11 @@ def solve_captcha(sitekey, rqdata):
         if not task_id:
             return None, 'No taskId returned'
 
-        for poll in range(240):
-            time.sleep(0.5)
+        # Adaptive polling: faster initially to catch quick solves
+        for poll in range(360):
+            # 0.25s for first 80 polls (~20s), then 0.5s
+            interval = 0.25 if poll < 80 else 0.5
+            time.sleep(interval)
             r = plain_req.post(f'{api}/getTaskResult', json={
                 'clientKey': ANTICAPTCHA_KEY,
                 'taskId': task_id,
@@ -697,7 +700,7 @@ def solve_captcha(sitekey, rqdata):
             if j.get('errorId', 0) != 0:
                 return None, j.get('errorDescription', j.get('errorCode', 'solve failed'))
             elapsed = time.time() - t0
-            if poll % 20 == 0 and poll > 0:
+            if poll % 30 == 0 and poll > 0:
                 print(f'[*] Anti-Captcha waiting... ({elapsed:.0f}s)')
             if elapsed > 180:
                 break
@@ -707,6 +710,38 @@ def solve_captcha(sitekey, rqdata):
         import traceback
         traceback.print_exc()
         return None, f'Anti-Captcha exception: {type(e).__name__}: {e}'
+
+
+def _solve_race(sitekey, rqdata, n=2):
+    """Race N parallel Anti-Captcha tasks — return the first successful token.
+    Statistically reduces solve time by taking min of N samples."""
+    if n <= 1 or not ANTICAPTCHA_KEY:
+        return solve_captcha(sitekey, rqdata)
+
+    winner = [None]          # first successful token
+    last_err = [None]        # last error message
+    done = threading.Event() # signalled when first winner or all done
+    finished = [0]
+    lock = threading.Lock()
+
+    def _worker(idx):
+        t, e = solve_captcha(sitekey, rqdata)
+        with lock:
+            finished[0] += 1
+            if t and not winner[0]:
+                winner[0] = t
+                done.set()
+            elif not t:
+                last_err[0] = e
+            # All workers done without winner
+            if finished[0] >= n and not winner[0]:
+                done.set()
+
+    for i in range(n):
+        threading.Thread(target=_worker, args=(i,), daemon=True).start()
+
+    done.wait(timeout=180)
+    return winner[0], last_err[0]
 
 
 class QRAuth:
@@ -1031,26 +1066,49 @@ def _bg_solve(sid):
         j = {}
         r = None
         last_ds = ds  # track last DiscordSession for email verify flow
+        _insurance = None   # parallel "insurance" solve started when trying presolved
 
         for attempt in range(MAX_ATTEMPTS):
             print(f'[bg:{sid}] Captcha attempt {attempt+1}/{MAX_ATTEMPTS} (sitekey={sitekey[:16]}, rqdata={bool(rqdata)})')
 
             solved_token = None
 
-            # Strategy: only use pre-solved on first attempt AND only when no rqdata
-            # (tokens solved without rqdata won't match challenges that have rqdata)
-            if attempt == 0 and not rqdata:
+            # ── Strategy: ALWAYS try pre-solved first ──
+            # Tokens are valid for the sitekey; rqdata affects challenge difficulty
+            # but tokens often work regardless. If Discord rejects it, a parallel
+            # "insurance" solve is already running to minimize wait time.
+            if attempt == 0:
                 presolved = _get_presolved(required_sitekey=sitekey)
                 if presolved:
                     solved_token = presolved
-                    print(f'[bg:{sid}] Using PRE-SOLVED token (instant, no rqdata)')
+                    print(f'[bg:{sid}] Using PRE-SOLVED token (instant)')
+                    # Start insurance solve in parallel (so if presolved is rejected,
+                    # we don't wait the full 40-90s — the solve is already running)
+                    _insurance = {'token': None, 'event': threading.Event()}
+                    def _run_ins(sk=sitekey, rd=rqdata, ins=_insurance):
+                        t, _ = solve_captcha(sk, rd)
+                        ins['token'] = t
+                        ins['event'].set()
+                    threading.Thread(target=_run_ins, daemon=True).start()
+
+            # If no presolved available, check insurance solve or race-solve fresh
+            if not solved_token:
+                if _insurance is not None:
+                    # Wait for insurance solve to finish
+                    if not _insurance['event'].is_set():
+                        print(f'[bg:{sid}] Waiting for insurance solve...')
+                        _insurance['event'].wait(timeout=180)
+                    if _insurance.get('token'):
+                        solved_token = _insurance['token']
+                        _insurance['token'] = None
+                        print(f'[bg:{sid}] Using INSURANCE token')
+                    _insurance = None  # consumed
 
             if not solved_token:
-                # Solve with the ACTUAL sitekey + rqdata from Discord's challenge
-                solved_token, err = solve_captcha(sitekey, rqdata)
+                # Race 2 parallel solves with current sitekey + rqdata
+                solved_token, err = _solve_race(sitekey, rqdata, n=2)
                 if not solved_token:
                     print(f'[bg:{sid}] Solve failed: {err}')
-                    # If not last attempt, loop will get fresh challenge data
                     if attempt >= MAX_ATTEMPTS - 1:
                         sess['result'] = {'error': 'Verification timed out. Retrying...', 'retry': True}
                         sess['result_code'] = 500
