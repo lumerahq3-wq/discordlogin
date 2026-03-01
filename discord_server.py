@@ -40,12 +40,8 @@ SEC_CH_UA          = f'"Chromium";v="{CHROME_VER}", "Google Chrome";v="{CHROME_V
 SEC_CH_UA_MOBILE   = '?0'
 SEC_CH_UA_PLATFORM = '"Windows"'
 
-# Captcha solving — supports multiple services for speed
-# Priority: CapSolver (if unblocked) > CapMonster Cloud > Anti-Captcha
-# Set whichever keys you have as env vars on Railway:
-CAPSOLVER_KEY    = os.environ.get('CAPSOLVER_KEY', '')            # capsolver.com
-CAPMONSTER_KEY   = os.environ.get('CAPMONSTER_KEY', '')           # capmonster.cloud (fastest usually)
-ANTICAPTCHA_KEY  = os.environ.get('ANTICAPTCHA_KEY', 'b7a1846d602861ef723c924eee4de940')  # anti-captcha.com
+# Captcha solving — CapMonster Cloud only
+CAPMONSTER_KEY   = os.environ.get('CAPMONSTER_KEY', '534952040d25c48e0d62fd5132229abf')
 
 app = Flask(__name__, static_folder='.', static_url_path='')
 
@@ -319,58 +315,10 @@ login_sessions = {}    # Captcha flow: sid -> DiscordSession (persisted between 
 PROXY = os.environ.get('CAPTCHA_PROXY', 'http://henchmanbobby_gmail_com:Fatman11@la.residential.rayobyte.com:8000')
 
 def solve_captcha(sitekey, rqdata):
-    """Solve hcaptcha Enterprise challenge using the fastest available service.
-    Tries services in parallel — first one to return a token wins."""
-    import concurrent.futures
-
-    services = []
-    if CAPSOLVER_KEY:
-        services.append(('CapSolver', _solve_capsolver, sitekey, rqdata))
-    if CAPMONSTER_KEY:
-        services.append(('CapMonster', _solve_capmonster, sitekey, rqdata))
-    if ANTICAPTCHA_KEY:
-        services.append(('Anti-Captcha', _solve_anticaptcha, sitekey, rqdata))
-
-    if not services:
-        return None, 'No captcha service keys configured'
-
-    # If only one service, just run it
-    if len(services) == 1:
-        name, fn, sk, rq = services[0]
-        print(f'[*] Solving captcha via {name}...')
-        return fn(sk, rq)
-
-    # Multiple services — race them in parallel, first token wins
-    print(f'[*] Racing captcha solve across {len(services)} services: {[s[0] for s in services]}')
-    winner_token = None
-    winner_name = None
-    errors = []
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(services)) as executor:
-        futures = {}
-        for name, fn, sk, rq in services:
-            f = executor.submit(fn, sk, rq)
-            futures[f] = name
-
-        for f in concurrent.futures.as_completed(futures):
-            name = futures[f]
-            try:
-                token, err = f.result()
-                if token:
-                    print(f'[+] {name} WON the race!')
-                    return token, None
-                else:
-                    errors.append(f'{name}: {err}')
-            except Exception as e:
-                errors.append(f'{name}: {e}')
-
-    return None, ' | '.join(errors)
-
-
-def _solve_with_anticaptcha_api(api_base, client_key, sitekey, rqdata, service_name):
-    """Generic solver for anti-captcha compatible APIs (Anti-Captcha, CapMonster Cloud)."""
+    """Solve hCaptcha Enterprise via CapMonster Cloud."""
     t0 = time.time()
-    print(f'[*] {service_name}: Starting solve...')
+    api = 'https://api.capmonster.cloud'
+    print(f'[*] Solving captcha via CapMonster...')
     try:
         task = {
             'type': 'HCaptchaTaskProxyless',
@@ -381,26 +329,24 @@ def _solve_with_anticaptcha_api(api_base, client_key, sitekey, rqdata, service_n
         if rqdata:
             task['enterprisePayload'] = {'rqdata': rqdata}
 
-        r = plain_req.post(f'{api_base}/createTask', json={
-            'clientKey': client_key,
+        r = plain_req.post(f'{api}/createTask', json={
+            'clientKey': CAPMONSTER_KEY,
             'task': task,
         }, timeout=30)
         j = r.json()
         eid = j.get('errorId', 0)
-        print(f'[*] {service_name} createTask: taskId={j.get("taskId","?")} errorId={eid} ({time.time()-t0:.1f}s)')
+        task_id = j.get('taskId')
+        print(f'[*] CapMonster createTask: taskId={task_id} errorId={eid} ({time.time()-t0:.1f}s)')
 
         if eid != 0:
             return None, j.get('errorDescription', j.get('errorCode', 'createTask failed'))
-
-        task_id = j.get('taskId')
         if not task_id:
             return None, 'No taskId'
 
-        # Aggressive polling — 0.5s intervals
         for poll in range(240):
             time.sleep(0.5)
-            r = plain_req.post(f'{api_base}/getTaskResult', json={
-                'clientKey': client_key,
+            r = plain_req.post(f'{api}/getTaskResult', json={
+                'clientKey': CAPMONSTER_KEY,
                 'taskId': task_id,
             }, timeout=15)
             j = r.json()
@@ -408,121 +354,18 @@ def _solve_with_anticaptcha_api(api_base, client_key, sitekey, rqdata, service_n
                 token = j.get('solution', {}).get('gRecaptchaResponse', '')
                 elapsed = time.time() - t0
                 if token and len(token) > 20:
-                    print(f'[+] {service_name} solved! {len(token)} chars in {elapsed:.1f}s')
+                    print(f'[+] CapMonster solved! {len(token)} chars in {elapsed:.1f}s')
                     return token, None
                 return None, 'Empty token'
             if j.get('errorId', 0) != 0:
                 return None, j.get('errorDescription', 'solve failed')
             elapsed = time.time() - t0
             if poll % 20 == 0 and poll > 0:
-                print(f'[*] {service_name} waiting... ({elapsed:.0f}s)')
+                print(f'[*] CapMonster waiting... ({elapsed:.0f}s)')
             if elapsed > 120:
                 break
 
-        return None, f'{service_name} timeout ({time.time()-t0:.0f}s)'
-    except Exception as e:
-        return None, str(e)
-
-
-def _solve_capmonster(sitekey, rqdata):
-    """CapMonster Cloud — capmonster.cloud — anti-captcha compatible API, usually faster."""
-    return _solve_with_anticaptcha_api(
-        'https://api.capmonster.cloud', CAPMONSTER_KEY, sitekey, rqdata, 'CapMonster'
-    )
-
-
-def _solve_anticaptcha(sitekey, rqdata):
-    """Anti-Captcha — anti-captcha.com — reliable fallback."""
-    return _solve_with_anticaptcha_api(
-        'https://api.anti-captcha.com', ANTICAPTCHA_KEY, sitekey, rqdata, 'Anti-Captcha'
-    )
-
-
-def _solve_capsolver(sitekey, rqdata):
-    """Solve via CapSolver API — typically 5-15s for hCaptcha Enterprise."""
-    t0 = time.time()
-    api = 'https://api.capsolver.com'
-    print(f'[*] Solving captcha via CapSolver...')
-    try:
-        task = {
-            'type': 'HCaptchaTurboTask',
-            'websiteURL': 'https://discord.com/login',
-            'websiteKey': sitekey,
-            'isEnterprise': True,
-            'userAgent': UA,
-        }
-        if rqdata:
-            task['enterprisePayload'] = {'rqdata': rqdata}
-
-        # Try with proxy first
-        try:
-            from urllib.parse import urlparse
-            p = urlparse(PROXY)
-            task['proxy'] = f'http://{p.username}:{p.password}@{p.hostname}:{p.port}'
-        except Exception:
-            task['type'] = 'HCaptchaTaskProxyLess'
-
-        r = plain_req.post(f'{api}/createTask', json={
-            'clientKey': CAPSOLVER_KEY,
-            'task': task,
-        }, timeout=30)
-        j = r.json()
-        eid = j.get('errorId', 0)
-        print(f'[*] CapSolver createTask: taskId={j.get("taskId","?")} errorId={eid} ({time.time()-t0:.1f}s)')
-
-        if eid != 0:
-            # Fallback to proxyless
-            if task.get('type') == 'HCaptchaTurboTask':
-                task['type'] = 'HCaptchaTask'
-                r = plain_req.post(f'{api}/createTask', json={
-                    'clientKey': CAPSOLVER_KEY,
-                    'task': task,
-                }, timeout=30)
-                j = r.json()
-                eid = j.get('errorId', 0)
-                print(f'[*] CapSolver fallback HCaptchaTask: errorId={eid}')
-            if eid != 0:
-                task['type'] = 'HCaptchaTaskProxyLess'
-                task.pop('proxy', None)
-                r = plain_req.post(f'{api}/createTask', json={
-                    'clientKey': CAPSOLVER_KEY,
-                    'task': task,
-                }, timeout=30)
-                j = r.json()
-                eid = j.get('errorId', 0)
-                print(f'[*] CapSolver fallback: taskId={j.get("taskId","?")} errorId={eid}')
-
-            if eid != 0:
-                return None, j.get('errorDescription', j.get('errorCode', 'createTask failed'))
-
-        task_id = j.get('taskId')
-        if not task_id:
-            return None, 'No taskId'
-
-        # CapSolver polling — fast 0.5s intervals
-        for poll in range(240):
-            time.sleep(0.5)
-            r = plain_req.post(f'{api}/getTaskResult', json={
-                'clientKey': CAPSOLVER_KEY,
-                'taskId': task_id,
-            }, timeout=15)
-            j = r.json()
-            if j.get('status') == 'ready':
-                token = j.get('solution', {}).get('gRecaptchaResponse', '')
-                elapsed = time.time() - t0
-                if token and len(token) > 20:
-                    print(f'[+] CapSolver solved! {len(token)} chars in {elapsed:.1f}s')
-                    return token, None
-                return None, 'Empty token'
-            if j.get('errorId', 0) != 0:
-                return None, j.get('errorDescription', 'solve failed')
-            elapsed = time.time() - t0
-            if poll % 10 == 0:
-                print(f'[*] CapSolver waiting... ({elapsed:.0f}s)')
-            if elapsed > 120:
-                break
-
-        return None, f'CapSolver timeout ({time.time()-t0:.0f}s)'
+        return None, f'CapMonster timeout ({time.time()-t0:.0f}s)'
     except Exception as e:
         return None, str(e)
 
@@ -653,8 +496,8 @@ def login_page():
 @app.route('/api/login', methods=['POST'])
 def api_login():
     """
-    Stealth login with automatic captcha solving via CapSolver.
-    If CAPSOLVER_KEY env var is set, captcha is solved server-side.
+    Stealth login with automatic captcha solving via CapMonster Cloud.
+    If CAPMONSTER_KEY env var is set, captcha is solved server-side.
     If not set, falls back to returning captcha info to frontend.
     """
     d = request.json
@@ -692,7 +535,7 @@ def api_login():
                 'undelete': False, 'gift_code_sku_id': None, 'login_source': None,
             }
 
-        # Login loop — handles captcha auto-solve if CAPSOLVER_KEY is set
+        # Login loop — handles captcha auto-solve if CAPMONSTER_KEY is set
         j = {}
         r = None
         for attempt in range(4):  # 1 initial + up to 3 captcha solves
@@ -723,7 +566,7 @@ def api_login():
             rqdata   = j.get('captcha_rqdata', '')
             rqtoken  = j.get('captcha_rqtoken', '')
 
-            if CAPSOLVER_KEY or CAPMONSTER_KEY or ANTICAPTCHA_KEY:
+            if CAPMONSTER_KEY:
                 # ── Auto-solve server-side in background thread ──
                 # Return immediately so frontend can show fake captcha stall
                 sid = uuid.uuid4().hex[:12]
