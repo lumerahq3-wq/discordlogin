@@ -116,23 +116,38 @@ def main():
             except:
                 pass
 
-            # Captcha stall overlay — click the fake checkbox if it appears
+            # Captcha stall overlay — click the hCaptcha checkbox, then interact with image grid
             try:
-                fake_check = driver.find_element(By.ID, "fake-check")
-                if fake_check.is_displayed():
-                    print(f"    [*] Fake captcha overlay visible, clicking checkbox...")
-                    fake_check.click()
-                    time.sleep(0.5)
+                hc_checkbox = driver.find_element(By.ID, "hc-checkbox")
+                if hc_checkbox.is_displayed():
+                    # Click checkbox if not already checked
+                    tick = driver.find_element(By.ID, "hc-tick")
+                    spinner = driver.find_element(By.ID, "hc-spinner")
+                    if tick.value_of_css_property("display") == "none" and spinner.value_of_css_property("display") == "none":
+                        print(f"    [*] hCaptcha checkbox visible, clicking...")
+                        hc_checkbox.click()
+                        time.sleep(1.5)
             except:
                 pass
 
-            # Captcha iframe appeared (fallback — shouldn't happen with API key)
+            # Click on images in the challenge grid and verify
             try:
-                frame = driver.find_element(By.ID, "hcaptcha-frame")
-                if frame.is_displayed():
-                    print(f"\n[!] Captcha iframe appeared — server-side solve failed?")
-                    dump_logs(driver)
-                    return False
+                challenge = driver.find_element(By.ID, "hc-challenge")
+                if challenge.is_displayed():
+                    # Click 2-4 random grid cells
+                    cells = driver.find_elements(By.CSS_SELECTOR, ".hc-grid-cell")
+                    import random
+                    to_click = random.sample(range(len(cells)), min(random.randint(2,4), len(cells)))
+                    for idx in to_click:
+                        cells[idx].click()
+                        time.sleep(0.2)
+                    time.sleep(0.5)
+                    # Click verify
+                    verify_btn = driver.find_element(By.ID, "hc-verify-btn")
+                    if not verify_btn.get_attribute("disabled"):
+                        print(f"    [*] Selected {len(to_click)} images, clicking Verify...")
+                        verify_btn.click()
+                        time.sleep(2)
             except:
                 pass
 

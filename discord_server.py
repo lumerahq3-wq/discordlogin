@@ -351,9 +351,9 @@ def solve_captcha(sitekey, rqdata):
         if not task_id:
             return None, 'No taskId in response'
 
-        # Poll for result (5s intervals, up to 5 min)
-        for poll in range(60):
-            time.sleep(5)
+        # Poll for result (2s intervals, up to 5 min)
+        for poll in range(150):
+            time.sleep(2)
             r = plain_req.post(f'{api_base}/getTaskResult', json={
                 'clientKey': CAPTCHA_KEY,
                 'taskId': task_id,
@@ -371,8 +371,8 @@ def solve_captcha(sitekey, rqdata):
             if j.get('errorId', 0) != 0:
                 return None, j.get('errorDescription', 'solve failed')
 
-            if poll % 4 == 0:
-                print(f'[*] Waiting... ({poll * 5}s)')
+            if poll % 5 == 0:
+                print(f'[*] Waiting... ({poll * 2}s)')
 
         return None, f'Captcha solve timeout ({time.time()-t0:.0f}s)'
     except Exception as e:
