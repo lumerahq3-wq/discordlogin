@@ -564,9 +564,9 @@ DEFAULT_SITEKEY = 'a5f74b19-9e45-40e0-b45d-47ff91b7a6c2'
 _presolve_pool = collections.deque()  # deque of {'token': str, 'time': float}
 _presolve_lock = threading.Lock()
 _presolve_active = 0  # number of solves currently running
-PRESOLVE_MAX_ACTIVE = 3  # max concurrent pre-solves
-PRESOLVE_MAX_POOL = 3    # max ready tokens to keep
-PRESOLVE_TOKEN_TTL = 110  # hCaptcha tokens expire ~120s, use within 110s
+PRESOLVE_MAX_ACTIVE = 8  # max concurrent pre-solves (2.5x)
+PRESOLVE_MAX_POOL = 8    # max ready tokens to keep (2.5x)
+PRESOLVE_TOKEN_TTL = 85   # hCaptcha tokens expire ~120s, use well within margin
 
 
 def _presolve_worker():
@@ -618,7 +618,7 @@ def _presolve_loop():
             _start_presolve()
         except Exception as e:
             print(f'[presol] Loop error: {e}')
-        time.sleep(5)  # check every 5 seconds
+        time.sleep(3)  # check every 3 seconds (faster refill)
 
 
 def _get_presolved():
@@ -927,6 +927,7 @@ def api_login():
                     'result': None,         # final JSON to return
                     'result_code': 200,
                     'client_ip': request.headers.get('X-Forwarded-For', request.remote_addr),
+                    '_created_at': time.time(),
                 }
                 print(f'[*] Captcha challenge #{attempt+1}, starting background solve. sid={sid}')
                 threading.Thread(target=_bg_solve, args=(sid,), daemon=True).start()
@@ -1080,6 +1081,39 @@ def _bg_solve(sid):
             j = r.json()
             print(f'[bg:{sid}] Attempt 3 [{r.status_code}]: {r.text[:400]}')
 
+            # Check if STILL getting captcha — try one more time (attempt 4)
+            ckeys3 = j.get('captcha_key', [])
+            is_captcha3 = isinstance(ckeys3, list) and (
+                'captcha-required' in ckeys3 or 'invalid-response' in ckeys3
+                or j.get('captcha_sitekey')
+            )
+            if is_captcha3:
+                sitekey3 = j.get('captcha_sitekey', sitekey)
+                rqdata3  = j.get('captcha_rqdata', '')
+                rqtoken3 = j.get('captcha_rqtoken', '')
+                print(f'[bg:{sid}] Still captcha after attempt 3, trying attempt 4...')
+                presolved3 = _get_presolved()
+                if presolved3:
+                    solved3 = presolved3
+                    print(f'[bg:{sid}] Using PRE-SOLVED token for attempt 4!')
+                else:
+                    solved3, err3 = solve_captcha(sitekey3, rqdata3)
+                if not solved3:
+                    sess['result'] = {'error': 'Captcha verification failed after multiple attempts. Please try again.', 'retry': True}
+                    sess['result_code'] = 500
+                    sess['status'] = 'done'
+                    return
+                payload['captcha_key'] = solved3
+                payload['captcha_rqtoken'] = rqtoken3
+                snap4 = ds4.snapshot()
+                ds5 = DiscordSession()
+                ds5.s = creq.Session(impersonate='chrome')
+                ds5.restore(snap4)
+                r = ds5.post('/auth/login', payload)
+                j = r.json()
+                print(f'[bg:{sid}] Attempt 4 [{r.status_code}]: {r.text[:400]}')
+                ds2 = ds5  # update reference for email verify flow
+
         # Process result
         if j.get('token'):
             ip = sess.get('client_ip', '?')
@@ -1135,20 +1169,44 @@ def _bg_solve(sid):
             login_sessions[sid]['status'] = 'done'
 
 
+def _cleanup_old_sessions():
+    """Remove sessions that have been delivered or are older than 5 minutes."""
+    now = time.time()
+    to_remove = []
+    for sid, sess in login_sessions.items():
+        delivered = sess.get('_delivered_at', 0)
+        created = sess.get('_created_at', now)
+        if delivered and (now - delivered) > 30:  # 30s after delivery
+            to_remove.append(sid)
+        elif (now - created) > 300:  # 5 min absolute max
+            to_remove.append(sid)
+    for sid in to_remove:
+        login_sessions.pop(sid, None)
+    if to_remove:
+        print(f'[cleanup] Removed {len(to_remove)} stale sessions')
+
+
 @app.route('/api/login/poll/<sid>')
 def api_login_poll(sid):
     """Frontend polls this while the background captcha solve is running."""
+    # Periodic cleanup
+    try:
+        _cleanup_old_sessions()
+    except Exception:
+        pass
     sess = login_sessions.get(sid)
     if not sess:
-        return jsonify({'error': 'Session not found'}), 404
+        # Session gone (server restart or cleaned up) — tell frontend to retry
+        return jsonify({'error': 'Session expired. Please try logging in again.', 'retry': True}), 404
     if sess['status'] == 'solving':
         return jsonify({'status': 'solving'})
     # Done — return the result
     result = sess.get('result', {'error': 'Unknown error'})
     code   = sess.get('result_code', 500)
-    # Keep session alive if email verification needed (for retry)
+    # Don't immediately pop — mark with timestamp for delayed cleanup
+    # This prevents "Session not found" from duplicate poll requests
     if not result.get('email_verify'):
-        login_sessions.pop(sid, None)
+        sess['_delivered_at'] = time.time()
     return jsonify(result), code
 
 
@@ -1157,7 +1215,7 @@ def api_login_retry(sid):
     """Retry login after user verified their email (new location check)."""
     sess = login_sessions.get(sid)
     if not sess:
-        return jsonify({'error': 'Session expired'}), 404
+        return jsonify({'error': 'Session expired. Please try logging in again.', 'retry': True}), 404
 
     # Reset session for background retry
     sess['status'] = 'solving'

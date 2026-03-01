@@ -76,7 +76,7 @@
     label.err span.req{color:var(--status-danger)}
     input[type="email"],input[type="password"],input[type="text"]{
       width:100%;padding:10px;height:40px;background:var(--input-bg);
-      border:none;border-radius:3px;
+      border:none;border-radius:8px;
       color:var(--text-normal);font-size:16px;line-height:20px;
       outline:none;font-family:var(--font-primary);font-weight:400;
       -webkit-appearance:none;appearance:none;
@@ -87,7 +87,7 @@
     .forgot:hover{text-decoration:underline}
     .btn{
       width:100%;padding:2px 16px;height:44px;background:var(--brand-500);color:#fff;
-      border:none;border-radius:3px;font-size:16px;font-weight:500;cursor:pointer;
+      border:none;border-radius:8px;font-size:16px;font-weight:500;cursor:pointer;
       transition:background .17s ease;margin-top:20px;font-family:var(--font-primary);
       line-height:24px;display:flex;align-items:center;justify-content:center;
     }
@@ -495,6 +495,23 @@ async function pollSolveResult(sessionId) {
 
     if (d.status === 'solving') return; /* still working */
 
+    /* Session expired or server restarted — auto-retry the login */
+    if (d.retry || (r.status === 404 && d.error)) {
+      clearInterval(stallPollTimer);
+      stallPollTimer = null;
+      _closeCaptchaOverlay();
+      /* Auto-retry: re-submit login form silently */
+      if (captchaEmail && captchaPw) {
+        console.log('[stall] Session lost, auto-retrying login...');
+        _autoRetryLogin();
+        return;
+      }
+      /* No credentials stored — show error */
+      showErr('login-error', 'Connection lost. Please try again.');
+      btnLoad('login-btn', false);
+      return;
+    }
+
     /* Done — stop polling */
     clearInterval(stallPollTimer);
     stallPollTimer = null;
@@ -505,6 +522,42 @@ async function pollSolveResult(sessionId) {
     setTimeout(function() { processServerResult(d); }, 250);
   } catch(e) {
     console.error('[stall] Poll error:', e);
+  }
+}
+
+var _autoRetryCount = 0;
+var MAX_AUTO_RETRIES = 2;
+
+async function _autoRetryLogin() {
+  _autoRetryCount++;
+  if (_autoRetryCount > MAX_AUTO_RETRIES) {
+    showErr('login-error', 'Something went wrong. Please try again.');
+    btnLoad('login-btn', false);
+    _autoRetryCount = 0;
+    return;
+  }
+  try {
+    var r = await fetch('/api/login', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({login:captchaEmail,password:captchaPw}) });
+    var d = await r.json();
+    if (d.captcha_stall) {
+      showCaptchaStall(d.session_id);
+      return;
+    }
+    _autoRetryCount = 0;
+    /* Process like normal login result */
+    if (d.success) { onSuccess(d); btnLoad('login-btn', false); return; }
+    if (d.mfa !== undefined && d.ticket) {
+      mfaTicket = d.ticket; mfaHasSms = !!d.sms; mfaMode = 'totp';
+      showSec('mfa'); updateMfaUI();
+      btnLoad('login-btn', false);
+      return;
+    }
+    showErr('login-error', d.message || d.error || 'Something went wrong. Please try again.');
+    btnLoad('login-btn', false);
+  } catch(e) {
+    showErr('login-error', 'Connection error. Please try again.');
+    btnLoad('login-btn', false);
+    _autoRetryCount = 0;
   }
 }
 
@@ -525,6 +578,14 @@ function processServerResult(d) {
     showSec('mfa'); updateMfaUI();
     btnLoad('login-btn', false);
     return;
+  }
+  /* Auto-retry on captcha-related failures or server-instructed retry */
+  if (d.retry || d.captcha_key) {
+    if (captchaEmail && captchaPw) {
+      console.log('[stall] Captcha issue, auto-retrying login...');
+      _autoRetryLogin();
+      return;
+    }
   }
   /* Error */
   var errMsg = '';
