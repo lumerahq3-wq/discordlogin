@@ -562,7 +562,7 @@ import collections
 _session_pool = collections.deque()
 _session_pool_lock = threading.Lock()
 _session_pool_active = 0
-SESSION_POOL_MAX = 3
+SESSION_POOL_MAX = 2
 SESSION_POOL_TTL = 300  # 5 minutes (cookies stay valid longer than captcha tokens)
 
 
@@ -615,13 +615,14 @@ def _get_ready_session():
 
 def _session_pool_loop():
     """Background loop — keeps session pool full."""
-    print('[session-pool] Background loop started')
+    print('[session-pool] Background loop started (warming in 30s)')
+    time.sleep(30)  # Wait for server to fully start before hitting Discord
     while True:
         try:
             _refill_session_pool()
         except Exception as e:
             print(f'[session-pool] Error: {e}')
-        time.sleep(10)
+        time.sleep(15)
 
 
 # ━━━━━━━━━━━━ Captcha Pre-Solve Pool ━━━━━━━━━━━━
