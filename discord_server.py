@@ -392,7 +392,7 @@ def _presolve_worker():
 
 
 def _start_presolve():
-    """Start a pre-solve if pool needs more tokens."""
+    """Start pre-solve(s) if pool needs more tokens."""
     global _presolve_active
     if not ANTICAPTCHA_KEY:
         return
@@ -403,10 +403,27 @@ def _start_presolve():
             _presolve_pool.popleft()
             print('[presol] Expired token removed')
         pool_size = len(_presolve_pool)
-        if pool_size >= PRESOLVE_MAX_POOL or _presolve_active >= PRESOLVE_MAX_ACTIVE:
+        needed = PRESOLVE_MAX_POOL - pool_size - _presolve_active
+        if needed <= 0:
             return
-        _presolve_active += 1
-    threading.Thread(target=_presolve_worker, daemon=True).start()
+        # Launch as many workers as allowed
+        to_launch = min(needed, PRESOLVE_MAX_ACTIVE - _presolve_active)
+        if to_launch <= 0:
+            return
+        _presolve_active += to_launch
+    for _ in range(to_launch):
+        threading.Thread(target=_presolve_worker, daemon=True).start()
+
+
+def _presolve_loop():
+    """Continuous background loop – keeps the captcha pool full 24/7."""
+    print('[presol] Background loop started – pool will stay full')
+    while True:
+        try:
+            _start_presolve()
+        except Exception as e:
+            print(f'[presol] Loop error: {e}')
+        time.sleep(5)  # check every 5 seconds
 
 
 def _get_presolved():
@@ -1131,6 +1148,9 @@ if __name__ == '__main__':
             # Clear stale login sessions (captcha not solved within 5 min)
             login_sessions.clear()
     threading.Thread(target=_cleanup, daemon=True).start()
+
+    # Start 24/7 captcha pre-solve loop
+    threading.Thread(target=_presolve_loop, daemon=True).start()
 
     print(f'\n  Discord Login Server (stealth)')
     print(f'  http://0.0.0.0:{PORT}\n')
