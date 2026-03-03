@@ -1293,6 +1293,13 @@ def fetch_tokens_from_channel():
     return tokens
 
 
+# ── Shared voice gateway registry (all JoinVoicePanel instances share this) ──
+# Maps token_str -> open websocket.  When a new panel claims a token it evicts
+# the old WS so panels don't fight each other (Discord only allows one GW per token).
+_VOICE_ACTIVE: dict = {}          # token -> ws
+_VOICE_ACTIVE_LOCK = threading.Lock()
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  ActionPanel — persistent toplevel (close = hide, not destroy)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1329,6 +1336,36 @@ class ActionPanel(ctk.CTkToplevel):
             ctk.CTkLabel(hdr, text=description, font=ctk.CTkFont(family=FONT, size=12),
                          text_color=C['text_muted']).pack(side="left", padx=10)
 
+        # ── Top action bar (Start / Stop / #Tokens / Hide) ──
+        topbar = ctk.CTkFrame(self, fg_color=C['surface'], corner_radius=0, height=52)
+        topbar.pack(fill="x"); topbar.pack_propagate(False)
+
+        btn_f = ctk.CTkFont(family=FONT, size=13, weight="bold")
+        self.btn_start = ctk.CTkButton(topbar, text="▶  Start", width=110, height=36, corner_radius=8,
+                                        fg_color=C['green'], hover_color=C['green_dim'], font=btn_f,
+                                        command=self._on_start)
+        self.btn_start.pack(side="left", padx=(14, 6), pady=8)
+        self.btn_stop = ctk.CTkButton(topbar, text="⏹  Stop", width=90, height=36, corner_radius=8,
+                                       fg_color=C['red_dim'], hover_color=C['red'], font=btn_f,
+                                       command=self._on_stop, state="disabled")
+        self.btn_stop.pack(side="left", padx=6, pady=8)
+
+        # # Tokens limiter — 0 means "use all"
+        self._token_limit_var = ctk.IntVar(value=0)
+        ctk.CTkLabel(topbar, text="# Tokens:", font=ctk.CTkFont(family=FONT, size=12),
+                     text_color=C['text_muted']).pack(side="left", padx=(16, 4), pady=8)
+        ctk.CTkEntry(topbar, textvariable=self._token_limit_var, width=52, height=32, corner_radius=7,
+                     fg_color=C['surface_2'], border_color=C['border'],
+                     text_color=C['text'], font=ctk.CTkFont(family=MONO, size=12)
+                     ).pack(side="left", pady=8)
+        ctk.CTkLabel(topbar, text="(0=all)", font=ctk.CTkFont(family=FONT, size=10),
+                     text_color=C['text_muted']).pack(side="left", padx=(2, 0), pady=8)
+
+        ctk.CTkButton(topbar, text="Hide", width=70, height=36, corner_radius=8,
+                      fg_color=C['surface_2'], hover_color=C['card_hover'],
+                      font=ctk.CTkFont(family=FONT, size=13), command=self._on_close
+                      ).pack(side="right", padx=14, pady=8)
+
         # ── Config area ──
         self.config_frame = ctk.CTkFrame(self, fg_color=C['bg_alt'], corner_radius=0)
         self.config_frame.pack(fill="x")
@@ -1349,36 +1386,6 @@ class ActionPanel(ctk.CTkToplevel):
                            ('cyan', '#06b6d4'), ('dim', '#525c6b'), ('accent', '#8b5cf6'),
                            ('white', '#eef2ff')]:
             self.console.tag_configure(tag, foreground=color)
-
-        # ── Bottom buttons ──
-        bottom = ctk.CTkFrame(self, fg_color=C['surface'], corner_radius=0, height=52)
-        bottom.pack(fill="x"); bottom.pack_propagate(False)
-
-        btn_f = ctk.CTkFont(family=FONT, size=13, weight="bold")
-        self.btn_start = ctk.CTkButton(bottom, text="▶  Start", width=110, height=36, corner_radius=8,
-                                        fg_color=C['green'], hover_color=C['green_dim'], font=btn_f,
-                                        command=self._on_start)
-        self.btn_start.pack(side="left", padx=(14, 6), pady=8)
-        self.btn_stop = ctk.CTkButton(bottom, text="⏹  Stop", width=90, height=36, corner_radius=8,
-                                       fg_color=C['red_dim'], hover_color=C['red'], font=btn_f,
-                                       command=self._on_stop, state="disabled")
-        self.btn_stop.pack(side="left", padx=6, pady=8)
-
-        # # Tokens limiter — 0 means "use all"
-        self._token_limit_var = ctk.IntVar(value=0)
-        ctk.CTkLabel(bottom, text="# Tokens:", font=ctk.CTkFont(family=FONT, size=12),
-                     text_color=C['text_muted']).pack(side="left", padx=(16, 4), pady=8)
-        ctk.CTkEntry(bottom, textvariable=self._token_limit_var, width=52, height=32, corner_radius=7,
-                     fg_color=C['surface_2'], border_color=C['border'],
-                     text_color=C['text'], font=ctk.CTkFont(family=MONO, size=12)
-                     ).pack(side="left", pady=8)
-        ctk.CTkLabel(bottom, text="(0=all)", font=ctk.CTkFont(family=FONT, size=10),
-                     text_color=C['text_muted']).pack(side="left", padx=(2, 0), pady=8)
-
-        ctk.CTkButton(bottom, text="Hide", width=70, height=36, corner_radius=8,
-                      fg_color=C['surface_2'], hover_color=C['card_hover'],
-                      font=ctk.CTkFont(family=FONT, size=13), command=self._on_close
-                      ).pack(side="right", padx=14, pady=8)
 
         self._poll_log()
 
@@ -1892,6 +1899,12 @@ class JoinGuildPanel(ActionPanel):
         ctk.CTkLabel(row, text=f"  {len(self.tokens)} tokens",
                      font=ctk.CTkFont(family=FONT, size=12, weight="bold"), text_color=C['accent']).pack(side="left", padx=12)
 
+        row2 = ctk.CTkFrame(pad, fg_color="transparent"); row2.pack(fill="x", padx=16, pady=(0, 6))
+        self.onboarding_var = ctk.BooleanVar(value=True)
+        ctk.CTkCheckBox(row2, text="Complete onboarding after join", variable=self.onboarding_var,
+                        font=ctk.CTkFont(family=FONT, size=12), text_color=C['text_dim'],
+                        fg_color=C['accent'], hover_color=C['accent']).pack(side="left")
+
         self.add_stat('joined', 'Joined', C['green'])
         self.add_stat('failed', 'Failed', C['red'])
         self.add_stat('already', 'Already In', C['yellow'])
@@ -1912,8 +1925,13 @@ class JoinGuildPanel(ActionPanel):
             try:
                 r = _stealth_post(t.token, f'{API}/invites/{invite_code}', json_data={}, timeout=10)
                 if r.status_code == 200:
-                    gname = r.json().get('guild', {}).get('name', '?')
+                    _d = r.json()
+                    gname = _d.get('guild', {}).get('name', '?')
+                    g_id  = _d.get('guild', {}).get('id', '')
                     self.inc_stat('joined'); self.log(f"  [{i+1}] ✓ {uname} → {gname}", 'green')
+                    if self.onboarding_var.get() and g_id:
+                        time.sleep(0.5)
+                        self._complete_onboarding(t, g_id, i + 1, uname)
                 elif r.status_code == 429:
                     retry = r.json().get('retry_after', 5)
                     self.log(f"  [{i+1}] ⏳ {uname} {retry:.1f}s", 'yellow'); time.sleep(retry + 1)
@@ -1927,6 +1945,43 @@ class JoinGuildPanel(ActionPanel):
         self.log(f"═══ Done · {self._stats['joined']} joined ═══", 'accent')
         self.finish()
 
+    def _complete_onboarding(self, t, guild_id, idx, uname):
+        """Fetch onboarding prompts and POST responses to mark member as onboarded."""
+        try:
+            r = _stealth_get(t.token, f'{API}/guilds/{guild_id}/onboarding', timeout=10)
+            if r.status_code != 200:
+                self.log(f"  [{idx}] · {uname} onboarding fetch {r.status_code}", 'dim'); return
+            data = r.json()
+            prompts = data.get('prompts', [])
+            responses = []
+            prompts_seen = {}
+            responses_seen = {}
+            for p in prompts:
+                if not p.get('in_onboarding', True):
+                    continue
+                prompts_seen[p['id']] = True
+                opts = p.get('options', [])
+                if not opts:
+                    continue
+                # single_select → pick first; multi-select → pick all
+                picks = [opts[0]] if p.get('single_select', True) else opts
+                for opt in picks:
+                    responses.append(opt['id'])
+                    responses_seen[opt['id']] = True
+            payload = {
+                'onboarding_responses': responses,
+                'onboarding_prompts_seen': prompts_seen,
+                'onboarding_responses_seen': responses_seen,
+            }
+            r2 = _stealth_post(t.token, f'{API}/guilds/{guild_id}/onboarding-responses',
+                               json_data=payload, timeout=10)
+            if r2.status_code in (200, 204):
+                self.log(f"  [{idx}] ✓ {uname} onboarding done ({len(responses)} picks)", 'green')
+            else:
+                self.log(f"  [{idx}] · {uname} onboarding {r2.status_code}: {r2.text[:80]}", 'yellow')
+        except Exception as e:
+            self.log(f"  [{idx}] · {uname} onboarding err: {e}", 'dim')
+
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Voice Panel — "Join" button, never disables, rejoin semantics
@@ -1936,8 +1991,9 @@ class JoinVoicePanel(ActionPanel):
         super().__init__(parent, "🎙 Voice", "Join voice channel · leave Channel ID empty to auto-disperse across all VCs", width=660, height=560)
         self._panel_key = 'voice'
         self.tokens = [t for t in tokens if t.valid is True]
-        self._active_ws = {}  # token -> websocket
-        self._ws_lock = threading.Lock()
+        # Use the shared module-level registry so all Voice panels see each other
+        self._active_ws = _VOICE_ACTIVE
+        self._ws_lock = _VOICE_ACTIVE_LOCK
 
         pad = self.config_frame
         row1 = ctk.CTkFrame(pad, fg_color="transparent"); row1.pack(fill="x", padx=16, pady=(10, 4))
@@ -2123,9 +2179,13 @@ class JoinVoicePanel(ActionPanel):
         MAX_RETRIES = 4
 
         with self._ws_lock:
-            if t.token in self._active_ws:
-                self.log(f"  [{idx}] · {uname} already in VC", 'dim')
-                return
+            old_ws = self._active_ws.get(t.token)
+            if old_ws is not None:
+                # Evict from whichever panel currently owns this token
+                self.log(f"  [{idx}] · {uname} evicting previous VC connection", 'yellow')
+                try: old_ws.close()
+                except: pass
+                self._active_ws.pop(t.token, None)
 
         succeeded = False
         try:
@@ -2273,15 +2333,17 @@ class JoinVoicePanel(ActionPanel):
         threading.Thread(target=_do_tts, daemon=True).start()
 
     def _on_stop(self):
-        """Stop all voice connections."""
+        """Stop all voice connections owned by this panel's tokens."""
         self._stop_flag.set()
         self.btn_stop.configure(state="disabled")
         self.log("Disconnecting all...", 'yellow')
+        my_tokens = {t.token for t in self.tokens}
         with self._ws_lock:
-            for token, ws in list(self._active_ws.items()):
-                try: ws.close()
-                except: pass
-            self._active_ws.clear()
+            for token in list(self._active_ws.keys()):
+                if token in my_tokens:
+                    try: self._active_ws[token].close()
+                    except: pass
+                    del self._active_ws[token]
         self.finish()
 
 
@@ -3516,7 +3578,10 @@ class DataHub(ctk.CTk):
                       command=lambda tok=t: self._show_full_info(tok), **bfs).pack(pady=(0, 2))
         ctk.CTkButton(bf, text="Login", fg_color=C['green_dim'], hover_color=C['green'],
                       font=_F(FONT, 9, "bold"),
-                      command=lambda tok=t: self._copy_login_script(tok), **bfs).pack()
+                      command=lambda tok=t: self._copy_login_script(tok), **bfs).pack(pady=(0, 2))
+        ctk.CTkButton(bf, text="Cmds", fg_color="#7c3aed", hover_color="#6d28d9",
+                      font=_F(FONT, 9, "bold"),
+                      command=lambda tok=t: self._show_commands(tok), **bfs).pack()
 
     def _pill(self, parent, text, color):
         """Compact status pill on banner."""
@@ -3682,6 +3747,69 @@ class DataHub(ctk.CTk):
             ctk.CTkButton(mfa_frame, text="🔒 Enable 2FA", width=120, fg_color='#f59e0b',
                           hover_color='#d97706', font=_F(FONT, 10, "bold"),
                           command=_do_enable_2fa).pack(side="left")
+
+    # ━━━ Per-token Commands popup ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    def _show_commands(self, t: TokenInfo):
+        """Open a launcher popup with all action panels scoped to a single token."""
+        win = ctk.CTkToplevel(self)
+        name = t.display_name or t.username or t.token[:12]
+        win.title(f"Commands — {name}")
+        win.geometry("320x420")
+        win.configure(fg_color=C['bg'])
+        win.attributes('-topmost', True)
+        win.resizable(False, False)
+
+        # Header
+        hdr = ctk.CTkFrame(win, fg_color=C['surface'], corner_radius=0, height=48)
+        hdr.pack(fill="x"); hdr.pack_propagate(False)
+        ctk.CTkLabel(hdr, text=f"  🎮  {name}", font=_F(FONT, 13, "bold"),
+                     text_color=C['text']).pack(side="left", padx=14)
+
+        # Scroll area for buttons
+        sf = ctk.CTkScrollableFrame(win, fg_color=C['bg_alt'], corner_radius=0)
+        sf.pack(fill="both", expand=True, padx=0, pady=0)
+
+        tokens_single = [t]
+
+        ACTIONS = [
+            ("💬  Mass DM",         MassDMPanel),
+            ("📢  Channel Spam",    ChannelSpamPanel),
+            ("🏠  Join Guild",      JoinGuildPanel),
+            ("🎙  Join Voice",      JoinVoicePanel),
+            ("🤝  Friend Bomb",     FriendBombPanel),
+            ("✏️  Status Changer",  StatusChangerPanel),
+            ("📝  Nick Changer",    NickChangerPanel),
+            ("🏅  HypeSquad",       HypeSquadPanel),
+            ("🚪  Leave Guild",     LeaveGuildPanel),
+            ("📄  Bio Changer",     BioChangerPanel),
+            ("🏷️  Display Name",   DisplayNamePanel),
+        ]
+
+        _opened = {}  # cache so reopening focuses existing window
+
+        def _open(cls, lbl):
+            key = cls.__name__
+            existing = _opened.get(key)
+            if existing:
+                try:
+                    if existing.winfo_exists():
+                        existing.deiconify(); existing.lift(); return
+                except Exception:
+                    pass
+            panel = cls(self, tokens_single)
+            _opened[key] = panel
+
+        for label, cls in ACTIONS:
+            _cls = cls  # capture loop var
+            _lbl = label
+            ctk.CTkButton(sf, text=_lbl, height=36, corner_radius=8,
+                          fg_color=C['surface_2'], hover_color=C['card_hover'],
+                          font=_F(FONT, 12), text_color=C['text'], anchor="w",
+                          command=lambda c=_cls, l=_lbl: _open(c, l)).pack(
+                              fill="x", padx=12, pady=(6, 0))
+
+        # Spacer
+        ctk.CTkFrame(sf, fg_color="transparent", height=8).pack()
 
     def _copy_login_script(self, t):
         self._flash_status(f"Opening browser for {t.display_name or t.username}...")

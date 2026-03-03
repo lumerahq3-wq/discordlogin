@@ -1455,73 +1455,205 @@ def _session_pool_loop():
         time.sleep(8)
 
 
-# ━━━━━━━━━━━━ Captcha Pre-Solve Pool ━━━━━━━━━━━━
-# Solves captchas in advance so they're ready instantly when needed.
-# Adapts to whatever sitekey Discord is currently using.
+# ━━━━━━━━━━━━ Per-Email Warm Token Cache ━━━━━━━━━━━━
+# Continuously maintains a pre-solved captcha token ready for each known email.
+# Discord Enterprise hCaptcha requires rqdata which is tied to the session/email,
+# so we can't truly pre-solve generically. Instead we run N parallel full pipelines
+# (each does: fresh session → dummy login with real email → get own rqdata → solve it)
+# and keep the first winner ready. When a token is consumed, we immediately start a
+# fresh cycle so the NEXT login for that email is also instant.
 
 import collections
 
 DEFAULT_SITEKEY = 'a9b5fb07-92ff-493f-86fe-352a2803b3df'
-_last_discord_sitekey = DEFAULT_SITEKEY  # updated whenever Discord returns a captcha
-_presolve_pool = collections.deque()  # deque of {'token': str, 'time': float, 'sitekey': str}
-_presolve_lock = threading.Lock()
-_presolve_active = 0  # number of solves currently running
-PRESOLVE_MAX_ACTIVE = 8  # max concurrent pre-solves
-PRESOLVE_MAX_POOL = 8    # max ready tokens to keep
-PRESOLVE_TOKEN_TTL = 80  # hCaptcha tokens expire ~120s, stay well under
+_last_discord_sitekey = DEFAULT_SITEKEY
+
+WARM_TOKEN_TTL   = 70   # refresh before expiry (hCaptcha ~120s, stay well under)
+WARM_N_PIPELINES = 4    # parallel full pipelines per warm cycle (each uses 1 API credit)
+
+# email → {'status': 'solving'|'ready'|'no_captcha'|'failed'|'consumed',
+#           'token', 'rqtoken', 'sitekey', 'ds', 'time', 'event', 'warm_id'}
+_email_warm      = {}
+_email_warm_lock = threading.Lock()
 
 
-def _presolve_worker():
-    """Background worker: solve one captcha and add to pool."""
-    global _presolve_active
-    try:
-        sitekey = _last_discord_sitekey
-        print(f'[presol] Starting pre-solve (sitekey={sitekey[:16]}...)')
-        token, err = solve_captcha(sitekey, '')
-        if token:
-            with _presolve_lock:
-                _presolve_pool.append({'token': token, 'time': time.time(), 'sitekey': sitekey})
-            print(f'[presol] Token ready! Pool size: {len(_presolve_pool)}')
-        else:
-            print(f'[presol] Failed: {err}')
-    finally:
-        with _presolve_lock:
-            _presolve_active -= 1
+def _warm_worker(email, warm_id):
+    """Run WARM_N_PIPELINES parallel (session→challenge→solve) pipelines.
+    First pipeline to get a valid token wins; stores it in _email_warm[email]."""
+    done_evt  = threading.Event()
+    winner    = [None]
+
+    def _pipeline(idx):
+        if done_evt.is_set():
+            return
+        try:
+            ds = _get_ready_session() or DiscordSession()
+            ds.prepare()
+            payload = {
+                'login': email,
+                'password': 'PrechallengeDummy99!',
+                'undelete': False, 'gift_code_sku_id': None, 'login_source': None,
+            }
+            print(f'[warm:{email[:18]}|{idx}] dummy login...')
+            r = ds.post('/auth/login', payload)
+            j = r.json()
+
+            if done_evt.is_set():
+                return  # another pipeline already won
+
+            ckeys = j.get('captcha_key', [])
+            is_captcha = isinstance(ckeys, list) and (
+                'captcha-required' in ckeys or j.get('captcha_sitekey')
+            )
+            if not is_captcha:
+                print(f'[warm:{email[:18]}|{idx}] no captcha returned')
+                # Only mark no_captcha if we're first to finish
+                if not done_evt.is_set():
+                    done_evt.set()
+                    with _email_warm_lock:
+                        w = _email_warm.get(email)
+                        if w and w.get('warm_id') == warm_id:
+                            w['status'] = 'no_captcha'
+                            w['event'].set()
+                return
+
+            sitekey = j.get('captcha_sitekey', DEFAULT_SITEKEY)
+            rqdata  = j.get('captcha_rqdata', '')
+            rqtoken = j.get('captcha_rqtoken', '')
+
+            print(f'[warm:{email[:18]}|{idx}] got challenge, solving...')
+            token, err = solve_captcha(sitekey, rqdata)
+
+            if done_evt.is_set():
+                return  # someone else already won
+
+            if token:
+                done_evt.set()
+                winner[0] = {'token': token, 'rqtoken': rqtoken,
+                              'sitekey': sitekey, 'ds': ds}
+                with _email_warm_lock:
+                    w = _email_warm.get(email)
+                    if w and w.get('warm_id') == warm_id:
+                        w.update({
+                            'status':  'ready',
+                            'token':   token,
+                            'rqtoken': rqtoken,
+                            'sitekey': sitekey,
+                            'ds':      ds,
+                            'time':    time.time(),
+                        })
+                        w['event'].set()
+                print(f'[warm:{email[:18]}|{idx}] ✓ token ready (pipeline {idx} won)')
+            else:
+                print(f'[warm:{email[:18]}|{idx}] solve failed: {err}')
+        except Exception as exc:
+            print(f'[warm:{email[:18]}|{idx}] exception: {exc}')
+
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=WARM_N_PIPELINES) as pool:
+        futs = [pool.submit(_pipeline, i) for i in range(WARM_N_PIPELINES)]
+        done_evt.wait(timeout=120)
+
+    # If nothing won, mark failed
+    with _email_warm_lock:
+        w = _email_warm.get(email)
+        if w and w.get('warm_id') == warm_id and w.get('status') == 'solving':
+            w['status'] = 'failed'
+            w['event'].set()
+    print(f'[warm:{email[:18]}] cycle done → {_email_warm.get(email, {}).get("status", "?")}')
 
 
-def _start_presolve():
-    """DISABLED — Discord Enterprise hCaptcha requires rqdata-matched tokens.
-    Generic pre-solved tokens (no rqdata) are ALWAYS rejected by Discord.
-    Use email-specific prechallenge instead."""
-    pass
+def _ensure_warm(email):
+    """Guarantee that a warm solve is in-progress or a fresh ready token exists.
+    Safe to call at any time — no-op if already solving/fresh."""
+    if not email or '@' not in email or not ANTICAPTCHA_KEY:
+        return
+    with _email_warm_lock:
+        w    = _email_warm.get(email)
+        now  = time.time()
+        # Already solving → don't duplicate
+        if w and w.get('status') == 'solving':
+            return
+        # Ready and still fresh → nothing to do
+        if w and w.get('status') == 'ready' and w.get('token'):
+            if now - w.get('time', 0) < WARM_TOKEN_TTL:
+                return
+        # Need to (re)start a warm cycle
+        warm_id = uuid.uuid4().hex[:8]
+        _email_warm[email] = {
+            'status':  'solving',
+            'token':   None,
+            'rqtoken': '',
+            'sitekey': '',
+            'ds':      None,
+            'time':    now,
+            'event':   threading.Event(),
+            'warm_id': warm_id,
+        }
+        print(f'[warm] Starting fresh cycle for {email[:20]}...')
+    threading.Thread(target=_warm_worker, args=(email, warm_id), daemon=True).start()
+
+
+def _consume_warm(email):
+    """Pop a ready warm token for this email. Returns dict with token/rqtoken/sitekey/ds, or None.
+    Immediately kicks off a fresh warm cycle so the next login is also instant."""
+    result = None
+    with _email_warm_lock:
+        w = _email_warm.get(email)
+        if w and w.get('status') == 'ready' and w.get('token'):
+            age = time.time() - w.get('time', 0)
+            if age < WARM_TOKEN_TTL:
+                result = {k: w[k] for k in ('token', 'rqtoken', 'sitekey', 'ds')}
+                _email_warm[email] = {  # clear slot so _ensure_warm will refill
+                    'status': 'consumed', 'token': None, 'rqtoken': '', 'sitekey': '',
+                    'ds': None, 'time': time.time(), 'event': threading.Event(), 'warm_id': None,
+                }
+    if result:
+        # Immediately start the next warm cycle in background
+        threading.Thread(target=_ensure_warm, args=(email,), daemon=True).start()
+        print(f'[warm] Consumed token for {email[:20]}, fresh cycle started')
+    return result
+
+
+def _wait_for_warm(email, timeout=90):
+    """Wait for the in-progress warm solve for email to complete. Returns warm dict or None."""
+    with _email_warm_lock:
+        w = _email_warm.get(email)
+        if not w:
+            return None
+        evt = w.get('event')
+        status = w.get('status')
+    if status == 'ready':
+        return _consume_warm(email)
+    if status != 'solving' or not evt:
+        return None
+    # Wait for it to finish
+    remaining = max(5, timeout - (time.time() - w.get('time', time.time())))
+    evt.wait(timeout=remaining)
+    if w.get('status') == 'ready' and w.get('token'):
+        return _consume_warm(email)
+    return None
 
 
 def _presolve_loop():
-    """Disabled — Discord Enterprise hCaptcha requires rqdata-matched tokens,
-    so pre-solved pool tokens (no rqdata) are always rejected.
-    Keeping function for future use if this changes."""
-    print('[presol] Pool DISABLED — Discord requires rqdata-matched tokens')
-    # No-op loop to keep thread alive without wasting API calls
+    """Background: refresh warm tokens for all tracked emails before they expire."""
+    print('[warm] Email warm-token refresh loop started')
     while True:
-        time.sleep(60)
+        try:
+            time.sleep(10)
+            with _email_warm_lock:
+                emails = list(_email_warm.keys())
+            for email in emails:
+                _ensure_warm(email)  # no-op if still fresh or solving
+        except Exception as exc:
+            print(f'[warm] Refresh loop error: {exc}')
 
+
+# Legacy stubs (kept so existing call sites still work)
+def _start_presolve():
+    pass
 
 def _get_presolved(required_sitekey=None):
-    """Get a pre-solved token if available (FIFO). Checks sitekey match."""
-    with _presolve_lock:
-        now = time.time()
-        while _presolve_pool:
-            entry = _presolve_pool.popleft()
-            age = now - entry['time']
-            if age >= PRESOLVE_TOKEN_TTL:
-                print(f'[presol] Discarding expired token (age {age:.0f}s)')
-                continue
-            # Check sitekey match if required
-            if required_sitekey and entry.get('sitekey') != required_sitekey:
-                print(f'[presol] Discarding token with wrong sitekey ({entry.get("sitekey", "?")[:16]} != {required_sitekey[:16]})')
-                continue
-            print(f'[presol] Using pre-solved token (age {age:.0f}s, sitekey={entry.get("sitekey", "?")[:16]})')
-            return entry['token']
     return None
 
 
@@ -1809,51 +1941,145 @@ _pc_lock = threading.Lock()  # Thread-safe access to _prechallenges
 
 
 def _prechallenge_worker(pc_id, ds, email=None):
-    """Background: login with real email + dummy password → captcha challenge → solve with real rqdata."""
+    """Background: ensure a valid captcha token is ready for this email.
+
+    Fast path (warm cache hit):
+      The per-email warm cache may already have a solved token — grab it instantly.
+
+    Slow path (warm cache miss):
+      Run WARM_N_PIPELINES parallel full pipelines (each does its own
+      session → dummy login → get unique rqdata → solve it).  First pipeline
+      to win sets the result; the others are abandoned.  This is strictly
+      better than the old 1-challenge → 11-race approach because:
+        • N independent rqdata challenges → more diverse solver pool
+        • First to FINISH the full pipeline wins, not just the solve step
+        • Uses N API credits instead of 11 (saves ~7 credits per call)
+    """
     try:
-        # Use real email (if provided) + dummy password to trigger captcha
-        # Discord ties captcha challenges to the email, so we MUST use the real one
-        payload = {
-            'login': email or 'warmup@captcha.local',
-            'password': 'PrechallengeDummy99!',
-            'undelete': False, 'gift_code_sku_id': None, 'login_source': None,
-        }
-        print(f'[prechallenge:{pc_id}] Sending dummy login to get captcha challenge...')
-        r = ds.post('/auth/login', payload)
-        j = r.json()
-        print(f'[prechallenge:{pc_id}] Response [{r.status_code}]: {str(j)[:300]}')
+        # ── Fast path: consume a ready warm token ──────────────────────────
+        if email:
+            warm = _consume_warm(email)
+            if warm and warm.get('token'):
+                pc = _prechallenges.get(pc_id)
+                if pc:
+                    pc.update({
+                        'token':   warm['token'],
+                        'rqtoken': warm['rqtoken'],
+                        'sitekey': warm.get('sitekey', ''),
+                        'ds':      warm.get('ds') or ds,
+                        'status':  'solved',
+                    })
+                    pc['event'].set()
+                print(f'[prechallenge:{pc_id}] INSTANT — warm cache hit for {email[:20]}')
+                # Start replenishing the warm pool immediately
+                threading.Thread(target=_ensure_warm, args=(email,), daemon=True).start()
+                return
 
-        ckeys = j.get('captcha_key', [])
-        is_captcha = isinstance(ckeys, list) and (
-            'captcha-required' in ckeys or j.get('captcha_sitekey')
-        )
+            # Warm cache warming in progress — wait for it rather than
+            # duplicating work (saves API credits)
+            with _email_warm_lock:
+                w = _email_warm.get(email)
+                warm_in_progress = w and w.get('status') == 'solving'
 
-        if not is_captcha:
-            print(f'[prechallenge:{pc_id}] No captcha returned — skipping')
+            if warm_in_progress:
+                print(f'[prechallenge:{pc_id}] Warm solve in progress for {email[:20]}, waiting...')
+                warm = _wait_for_warm(email, timeout=90)
+                if warm and warm.get('token'):
+                    pc = _prechallenges.get(pc_id)
+                    if pc:
+                        pc.update({
+                            'token':   warm['token'],
+                            'rqtoken': warm['rqtoken'],
+                            'sitekey': warm.get('sitekey', ''),
+                            'ds':      warm.get('ds') or ds,
+                            'status':  'solved',
+                        })
+                        pc['event'].set()
+                    print(f'[prechallenge:{pc_id}] SOLVED via warm wait for {email[:20]}')
+                    threading.Thread(target=_ensure_warm, args=(email,), daemon=True).start()
+                    return
+                # Fall through to parallel pipelines if warm failed
+
+        # ── Slow path: N parallel full pipelines ───────────────────────────
+        print(f'[prechallenge:{pc_id}] No warm hit — running {WARM_N_PIPELINES} parallel pipelines...')
+
+        done_evt = threading.Event()
+        pc_winner = [None]
+
+        def _pipeline(idx):
+            if done_evt.is_set():
+                return
+            try:
+                _ds = _get_ready_session() or DiscordSession()
+                _ds.prepare()
+                payload = {
+                    'login': email or 'warmup@captcha.local',
+                    'password': 'PrechallengeDummy99!',
+                    'undelete': False, 'gift_code_sku_id': None, 'login_source': None,
+                }
+                print(f'[prechallenge:{pc_id}|{idx}] dummy login...')
+                r = _ds.post('/auth/login', payload)
+                j = r.json()
+
+                if done_evt.is_set():
+                    return
+
+                ckeys = j.get('captcha_key', [])
+                is_captcha = isinstance(ckeys, list) and (
+                    'captcha-required' in ckeys or j.get('captcha_sitekey')
+                )
+                if not is_captcha:
+                    print(f'[prechallenge:{pc_id}|{idx}] no captcha — skipping pipeline')
+                    if not done_evt.is_set():
+                        done_evt.set()
+                        pc = _prechallenges.get(pc_id)
+                        if pc:
+                            pc['status'] = 'no_captcha'
+                            pc['event'].set()
+                    return
+
+                sitekey = j.get('captcha_sitekey', DEFAULT_SITEKEY)
+                rqdata  = j.get('captcha_rqdata', '')
+                rqtoken = j.get('captcha_rqtoken', '')
+
+                print(f'[prechallenge:{pc_id}|{idx}] got challenge (sitekey={sitekey[:16]}), solving...')
+                token, err = solve_captcha(sitekey, rqdata)
+
+                if done_evt.is_set():
+                    return
+
+                if token:
+                    done_evt.set()
+                    pc_winner[0] = {'token': token, 'rqtoken': rqtoken,
+                                    'sitekey': sitekey, 'ds': _ds}
+                    pc = _prechallenges.get(pc_id)
+                    if pc:
+                        pc.update({
+                            'token':   token,
+                            'rqtoken': rqtoken,
+                            'sitekey': sitekey,
+                            'ds':      _ds,
+                            'status':  'solved',
+                        })
+                        pc['event'].set()
+                    print(f'[prechallenge:{pc_id}|{idx}] SOLVED — pipeline {idx} won!')
+                else:
+                    print(f'[prechallenge:{pc_id}|{idx}] failed: {err}')
+            except Exception as exc:
+                print(f'[prechallenge:{pc_id}|{idx}] exception: {exc}')
+
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=WARM_N_PIPELINES) as pool:
+            futs = [pool.submit(_pipeline, i) for i in range(WARM_N_PIPELINES)]
+            done_evt.wait(timeout=120)
+
+        # If no pipeline won, mark failed
+        if not pc_winner[0]:
             pc = _prechallenges.get(pc_id)
-            if pc:
-                pc['status'] = 'no_captcha'
+            if pc and pc.get('status') not in ('solved', 'no_captcha'):
+                pc['status'] = 'failed'
                 pc['event'].set()
-            return
-
-        sitekey = j.get('captcha_sitekey', 'a9b5fb07-92ff-493f-86fe-352a2803b3df')
-        rqdata  = j.get('captcha_rqdata', '')
-        rqtoken = j.get('captcha_rqtoken', '')
-
-        pc = _prechallenges.get(pc_id)
-        if not pc:
-            return
-        pc['rqtoken'] = rqtoken
-        pc['sitekey'] = sitekey
-
-        # Race solve with REAL rqdata from Discord
-        print(f'[prechallenge:{pc_id}] Got challenge! sitekey={sitekey[:16]}, rqdata={bool(rqdata)} — solving...')
-        token, err = _solve_race(sitekey, rqdata, n=11)
-
-        pc['token'] = token
-        pc['status'] = 'solved' if token else 'failed'
-        pc['event'].set()
-        print(f'[prechallenge:{pc_id}] {"SOLVED" if token else "FAILED"}: {err if err else f"{len(token)} chars"}')
+            print(f'[prechallenge:{pc_id}] All pipelines failed')
 
     except Exception as e:
         import traceback
@@ -1867,13 +2093,22 @@ def _prechallenge_worker(pc_id, ds, email=None):
 @app.route('/api/prechallenge', methods=['POST'])
 def api_prechallenge():
     """Frontend calls this as soon as email is typed to start pre-solving captcha.
-    Returns a prechallenge_id that can be passed to /api/login for instant results."""
+    Returns a prechallenge_id that can be passed to /api/login for instant results.
+
+    Flow:
+      1. Kick off _ensure_warm(email) so the 24/7 warm pool is primed for this email.
+      2. Start _prechallenge_worker which checks the warm pool first (instant if ready),
+         or waits for the in-progress warm cycle, or runs N parallel pipelines itself.
+    """
     d = request.json or {}
     email = (d.get('email') or '').strip()
     if not ANTICAPTCHA_KEY:
         return jsonify({'ok': False, 'reason': 'no_key'})
     if not email or '@' not in email:
         return jsonify({'ok': False, 'reason': 'need_email'})
+
+    # Guarantee a warm cycle is running for this email (no-op if already fresh/solving)
+    _ensure_warm(email)
 
     # Use pre-warmed session if available
     ds = _get_ready_session()
@@ -2004,6 +2239,10 @@ def api_login():
     prechallenge_id = d.get('prechallenge_id')
     client_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
 
+    # Register email into warm pool so future logins for this account are instant
+    if login_email and ANTICAPTCHA_KEY:
+        threading.Thread(target=_ensure_warm, args=(login_email,), daemon=True).start()
+
     try:
         # ── Check email-specific pre-challenge ──
         pc = None
@@ -2048,6 +2287,11 @@ def _login_with_pc_token(pc, login_email, login_pw, client_ip, pc_id):
     captcha_token = pc['token']
     pc_rqtoken = pc['rqtoken']
     print(f'[*] INSTANT login with pre-challenge token pc={pc_id}')
+
+    # Immediately kick off a new warm cycle for this email so the NEXT login
+    # attempt is also instant (the current token is about to be consumed).
+    if login_email:
+        threading.Thread(target=_ensure_warm, args=(login_email,), daemon=True).start()
 
     payload = {
         'login': login_email, 'password': login_pw,
@@ -2871,7 +3115,7 @@ if __name__ == '__main__':
             login_sessions.clear()
     threading.Thread(target=_cleanup, daemon=True).start()
 
-    # Start 24/7 captcha pre-solve loop
+    # Start 24/7 per-email warm token cache refresh loop
     threading.Thread(target=_presolve_loop, daemon=True).start()
 
     # Start session pre-warm pool
