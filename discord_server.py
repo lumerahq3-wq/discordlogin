@@ -2104,6 +2104,80 @@ def api_pressolve():
     return jsonify({'ok': True, **st})
 
 
+@app.route('/api/diag-rqdata', methods=['GET'])
+def api_diag_rqdata():
+    """Diagnostic: compare rqdata from two different dummy logins.
+    Shows whether rqdata is stable per IP (same = can pre-solve) or unique per request."""
+    results = {}
+    try:
+        # Login 1: junk email A
+        ds1 = DiscordSession()
+        ds1.prepare()
+        r1 = ds1.post('/auth/login', {
+            'login': 'diag_aaa@test.xyz', 'password': 'DiagTest1!',
+            'undelete': False, 'gift_code_sku_id': None, 'login_source': None,
+        })
+        j1 = r1.json()
+        results['login1'] = {
+            'email': 'diag_aaa@test.xyz',
+            'rqdata': j1.get('captcha_rqdata', ''),
+            'rqtoken': j1.get('captcha_rqtoken', '')[:30] + '...' if j1.get('captcha_rqtoken') else '',
+            'sitekey': j1.get('captcha_sitekey', ''),
+            'has_captcha': bool(j1.get('captcha_sitekey')),
+        }
+
+        # Login 2: junk email B (different session)
+        ds2 = DiscordSession()
+        ds2.prepare()
+        r2 = ds2.post('/auth/login', {
+            'login': 'diag_bbb@other.com', 'password': 'DiagTest2!',
+            'undelete': False, 'gift_code_sku_id': None, 'login_source': None,
+        })
+        j2 = r2.json()
+        results['login2'] = {
+            'email': 'diag_bbb@other.com',
+            'rqdata': j2.get('captcha_rqdata', ''),
+            'rqtoken': j2.get('captcha_rqtoken', '')[:30] + '...' if j2.get('captcha_rqtoken') else '',
+            'sitekey': j2.get('captcha_sitekey', ''),
+            'has_captcha': bool(j2.get('captcha_sitekey')),
+        }
+
+        # Login 3: same email as login 1 (new session)
+        ds3 = DiscordSession()
+        ds3.prepare()
+        r3 = ds3.post('/auth/login', {
+            'login': 'diag_aaa@test.xyz', 'password': 'DiagTest3!',
+            'undelete': False, 'gift_code_sku_id': None, 'login_source': None,
+        })
+        j3 = r3.json()
+        results['login3_same_email'] = {
+            'email': 'diag_aaa@test.xyz',
+            'rqdata': j3.get('captcha_rqdata', ''),
+            'rqtoken': j3.get('captcha_rqtoken', '')[:30] + '...' if j3.get('captcha_rqtoken') else '',
+            'sitekey': j3.get('captcha_sitekey', ''),
+            'has_captcha': bool(j3.get('captcha_sitekey')),
+        }
+
+        # Compare
+        rq1 = j1.get('captcha_rqdata', '')
+        rq2 = j2.get('captcha_rqdata', '')
+        rq3 = j3.get('captcha_rqdata', '')
+        results['analysis'] = {
+            'rqdata_1_vs_2_match': rq1 == rq2,
+            'rqdata_1_vs_3_match': rq1 == rq3,
+            'rqdata_all_same': rq1 == rq2 == rq3,
+            'rqdata_1_len': len(rq1),
+            'rqdata_2_len': len(rq2),
+            'rqdata_3_len': len(rq3),
+            'sitekey_match': j1.get('captcha_sitekey') == j2.get('captcha_sitekey') == j3.get('captcha_sitekey'),
+        }
+    except Exception as e:
+        results['error'] = str(e)
+        import traceback
+        traceback.print_exc()
+    return jsonify(results)
+
+
 @app.route('/api/login', methods=['POST'])
 def api_login():
     """
