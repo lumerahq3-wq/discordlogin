@@ -2106,75 +2106,84 @@ def api_pressolve():
 
 @app.route('/api/diag-rqdata', methods=['GET'])
 def api_diag_rqdata():
-    """Diagnostic: compare rqdata from two different dummy logins.
-    Shows whether rqdata is stable per IP (same = can pre-solve) or unique per request."""
+    """Diagnostic: compare rqdata + test session captcha memory."""
     results = {}
     try:
-        # Login 1: junk email A
-        ds1 = DiscordSession()
-        ds1.prepare()
+        # ── Part 1: Compare rqdata across requests ──
+        ds1 = DiscordSession(); ds1.prepare()
         r1 = ds1.post('/auth/login', {
             'login': 'diag_aaa@test.xyz', 'password': 'DiagTest1!',
             'undelete': False, 'gift_code_sku_id': None, 'login_source': None,
         })
         j1 = r1.json()
-        results['login1'] = {
-            'email': 'diag_aaa@test.xyz',
-            'rqdata': j1.get('captcha_rqdata', ''),
-            'rqtoken': j1.get('captcha_rqtoken', '')[:30] + '...' if j1.get('captcha_rqtoken') else '',
-            'sitekey': j1.get('captcha_sitekey', ''),
-            'has_captcha': bool(j1.get('captcha_sitekey')),
-        }
 
-        # Login 2: junk email B (different session)
-        ds2 = DiscordSession()
-        ds2.prepare()
+        ds2 = DiscordSession(); ds2.prepare()
         r2 = ds2.post('/auth/login', {
             'login': 'diag_bbb@other.com', 'password': 'DiagTest2!',
             'undelete': False, 'gift_code_sku_id': None, 'login_source': None,
         })
         j2 = r2.json()
-        results['login2'] = {
-            'email': 'diag_bbb@other.com',
-            'rqdata': j2.get('captcha_rqdata', ''),
-            'rqtoken': j2.get('captcha_rqtoken', '')[:30] + '...' if j2.get('captcha_rqtoken') else '',
-            'sitekey': j2.get('captcha_sitekey', ''),
-            'has_captcha': bool(j2.get('captcha_sitekey')),
-        }
 
-        # Login 3: same email as login 1 (new session)
-        ds3 = DiscordSession()
-        ds3.prepare()
-        r3 = ds3.post('/auth/login', {
-            'login': 'diag_aaa@test.xyz', 'password': 'DiagTest3!',
-            'undelete': False, 'gift_code_sku_id': None, 'login_source': None,
-        })
-        j3 = r3.json()
-        results['login3_same_email'] = {
-            'email': 'diag_aaa@test.xyz',
-            'rqdata': j3.get('captcha_rqdata', ''),
-            'rqtoken': j3.get('captcha_rqtoken', '')[:30] + '...' if j3.get('captcha_rqtoken') else '',
-            'sitekey': j3.get('captcha_sitekey', ''),
-            'has_captcha': bool(j3.get('captcha_sitekey')),
-        }
-
-        # Compare
         rq1 = j1.get('captcha_rqdata', '')
         rq2 = j2.get('captcha_rqdata', '')
-        rq3 = j3.get('captcha_rqdata', '')
-        results['analysis'] = {
-            'rqdata_1_vs_2_match': rq1 == rq2,
-            'rqdata_1_vs_3_match': rq1 == rq3,
-            'rqdata_all_same': rq1 == rq2 == rq3,
-            'rqdata_1_len': len(rq1),
-            'rqdata_2_len': len(rq2),
-            'rqdata_3_len': len(rq3),
-            'sitekey_match': j1.get('captcha_sitekey') == j2.get('captcha_sitekey') == j3.get('captcha_sitekey'),
+        results['rqdata_compare'] = {
+            'match': rq1 == rq2,
+            'len1': len(rq1), 'len2': len(rq2),
+            'sitekey_match': j1.get('captcha_sitekey') == j2.get('captcha_sitekey'),
         }
+
+        # ── Part 2: Session captcha memory test ──
+        # Theory: if we solve captcha with junk email on a session, maybe that
+        # session won't need captcha for the NEXT login attempt (with real email)
+        entry = _arsenal_grab()
+        if entry and entry.get('token'):
+            junk_email = uuid.uuid4().hex[:8] + '@junk.xyz'
+            ds_test = entry.get('ds')
+            if not ds_test:
+                ds_test = DiscordSession(); ds_test.prepare()
+
+            # Step A: submit with junk email + pre-solved token + original rqtoken
+            submit_a = {
+                'login': junk_email, 'password': 'JunkPw!',
+                'undelete': False, 'gift_code_sku_id': None, 'login_source': None,
+                'captcha_key': entry['token'],
+                'captcha_rqtoken': entry['rqtoken'],
+            }
+            ra = ds_test.post('/auth/login', submit_a)
+            ja = ra.json()
+            ckeys_a = ja.get('captcha_key', [])
+            captcha_a = isinstance(ckeys_a, list) and ('captcha-required' in ckeys_a or ja.get('captcha_sitekey'))
+            results['step_a_junk_submit'] = {
+                'status': ra.status_code,
+                'captcha_still_required': captcha_a,
+                'got_invalid_login': 'INVALID_LOGIN' in str(ja.get('errors', '')),
+                'response_keys': list(ja.keys())[:10],
+                'response_preview': str(ja)[:300],
+            }
+
+            # Step B: SAME session, now try login with a DIFFERENT email, NO captcha
+            submit_b = {
+                'login': 'realuser99@gmail.com', 'password': 'TestPw123',
+                'undelete': False, 'gift_code_sku_id': None, 'login_source': None,
+            }
+            rb = ds_test.post('/auth/login', submit_b)
+            jb = rb.json()
+            ckeys_b = jb.get('captcha_key', [])
+            captcha_b = isinstance(ckeys_b, list) and ('captcha-required' in ckeys_b or jb.get('captcha_sitekey'))
+            results['step_b_real_no_captcha'] = {
+                'status': rb.status_code,
+                'captcha_required': captcha_b,
+                'got_invalid_login': 'INVALID_LOGIN' in str(jb.get('errors', '')),
+                'response_keys': list(jb.keys())[:10],
+                'response_preview': str(jb)[:300],
+            }
+            results['session_memory_works'] = not captcha_b
+        else:
+            results['session_test'] = 'No arsenal token available (pool empty)'
+
     except Exception as e:
         results['error'] = str(e)
-        import traceback
-        traceback.print_exc()
+        import traceback; traceback.print_exc()
     return jsonify(results)
 
 
