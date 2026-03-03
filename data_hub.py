@@ -1344,6 +1344,18 @@ class ActionPanel(ctk.CTkToplevel):
                                        fg_color=C['red_dim'], hover_color=C['red'], font=btn_f,
                                        command=self._on_stop, state="disabled")
         self.btn_stop.pack(side="left", padx=6, pady=8)
+
+        # # Tokens limiter — 0 means "use all"
+        self._token_limit_var = ctk.IntVar(value=0)
+        ctk.CTkLabel(bottom, text="# Tokens:", font=ctk.CTkFont(family=FONT, size=12),
+                     text_color=C['text_muted']).pack(side="left", padx=(16, 4), pady=8)
+        ctk.CTkEntry(bottom, textvariable=self._token_limit_var, width=52, height=32, corner_radius=7,
+                     fg_color=C['surface_2'], border_color=C['border'],
+                     text_color=C['text'], font=ctk.CTkFont(family=MONO, size=12)
+                     ).pack(side="left", pady=8)
+        ctk.CTkLabel(bottom, text="(0=all)", font=ctk.CTkFont(family=FONT, size=10),
+                     text_color=C['text_muted']).pack(side="left", padx=(2, 0), pady=8)
+
         ctk.CTkButton(bottom, text="Hide", width=70, height=36, corner_radius=8,
                       fg_color=C['surface_2'], hover_color=C['card_hover'],
                       font=ctk.CTkFont(family=FONT, size=13), command=self._on_close
@@ -1440,6 +1452,16 @@ class ActionPanel(ctk.CTkToplevel):
 
     def on_start(self):
         pass
+
+    @property
+    def active_tokens(self):
+        """Return the slice of tokens to use, capped by the # Tokens input (0 = all)."""
+        tks = getattr(self, 'tokens', [])
+        try:
+            n = int(self._token_limit_var.get())
+        except Exception:
+            n = 0
+        return tks[:n] if n > 0 else tks
 
     @property
     def stopped(self):
@@ -1578,7 +1600,7 @@ class MassDMPanel(ActionPanel):
             self.log(f"  ✗ {label} ({e})", 'red'); return 'fail'
 
     def _worker(self, message, guild_delay, dm_delay, threads):
-        self.log(f"Starting Mass Blast · {len(self.tokens)} tokens · {threads} concurrent · guild {guild_delay}s · DM {dm_delay}s", 'accent')
+        self.log(f"Starting Mass Blast · {len(self.active_tokens)} tokens · {threads} concurrent · guild {guild_delay}s · DM {dm_delay}s", 'accent')
 
         def _run_token(i, t):
             if self.stopped: return
@@ -1705,7 +1727,7 @@ class MassDMPanel(ActionPanel):
 
         # Run N tokens concurrently
         with ThreadPoolExecutor(max_workers=threads) as pool:
-            futures = [pool.submit(_run_token, i, t) for i, t in enumerate(self.tokens)]
+            futures = [pool.submit(_run_token, i, t) for i, t in enumerate(self.active_tokens)]
             for f in as_completed(futures):
                 if self.stopped: break
                 try: f.result()
@@ -1781,9 +1803,9 @@ class ChannelSpamPanel(ActionPanel):
         threading.Thread(target=self._worker, args=(ch_id, g_id, msg, delay, count), daemon=True).start()
 
     def _worker(self, channel_id, guild_id, message, delay, count):
-        self.log(f"Channel spam · {count} msgs/token · {len(self.tokens)} tokens", 'accent')
+        self.log(f"Channel spam · {count} msgs/token · {len(self.active_tokens)} tokens", 'accent')
         eligible = []
-        for t in self.tokens:
+        for t in self.active_tokens:
             if self.stopped: break
             try:
                 r = _stealth_get(t.token, f'{API}/users/@me/guilds', timeout=8)
@@ -1863,8 +1885,8 @@ class JoinGuildPanel(ActionPanel):
         threading.Thread(target=self._worker, args=(code, delay), daemon=True).start()
 
     def _worker(self, invite_code, delay):
-        self.log(f"Joining {invite_code} · {len(self.tokens)} tokens", 'accent')
-        for i, t in enumerate(self.tokens):
+        self.log(f"Joining {invite_code} · {len(self.active_tokens)} tokens", 'accent')
+        for i, t in enumerate(self.active_tokens):
             if self.stopped: break
             uname = t.display_name or t.username or t.token[:12]
             try:
@@ -1912,7 +1934,7 @@ class JoinVoicePanel(ActionPanel):
                                          text_color=C['text'], font=ctk.CTkFont(family=MONO, size=12))
         self.guild_entry.pack(side="left")
 
-        row2 = ctk.CTkFrame(pad, fg_color="transparent"); row2.pack(fill="x", padx=16, pady=(2, 10))
+        row2 = ctk.CTkFrame(pad, fg_color="transparent"); row2.pack(fill="x", padx=16, pady=(2, 4))
         ctk.CTkLabel(row2, text=f"{len(self.tokens)} tokens available",
                      font=ctk.CTkFont(family=FONT, size=12, weight="bold"), text_color=C['accent']).pack(side="left")
 
@@ -1921,6 +1943,25 @@ class JoinVoicePanel(ActionPanel):
                         font=ctk.CTkFont(family=FONT, size=12), text_color=C['text_dim'],
                         fg_color=C['accent'], hover_color=C['accent_hover'],
                         border_color=C['border'], corner_radius=6).pack(side="left", padx=(20, 0))
+
+        # TTS row ─────────────────────────────────────────────
+        row3 = ctk.CTkFrame(pad, fg_color="transparent"); row3.pack(fill="x", padx=16, pady=(0, 10))
+        ctk.CTkLabel(row3, text="TTS Ch", font=ctk.CTkFont(family=FONT, size=12, weight="bold"),
+                     text_color=C['text_dim']).pack(side="left", padx=(0, 6))
+        self.tts_channel_entry = ctk.CTkEntry(row3, placeholder_text="Text channel ID", width=180, height=32,
+                                               corner_radius=8, fg_color=C['surface_2'], border_color=C['border'],
+                                               text_color=C['text'], font=ctk.CTkFont(family=MONO, size=12))
+        self.tts_channel_entry.pack(side="left")
+        ctk.CTkLabel(row3, text="  Msg", font=ctk.CTkFont(family=FONT, size=12, weight="bold"),
+                     text_color=C['text_dim']).pack(side="left", padx=(12, 6))
+        self.tts_msg_entry = ctk.CTkEntry(row3, placeholder_text="TTS message...", width=260, height=32,
+                                           corner_radius=8, fg_color=C['surface_2'], border_color=C['border'],
+                                           text_color=C['text'], font=ctk.CTkFont(family=FONT, size=13))
+        self.tts_msg_entry.pack(side="left", fill="x", expand=True)
+        ctk.CTkButton(row3, text="📢 Send TTS", width=100, height=32, corner_radius=8,
+                      fg_color=C['accent'], hover_color=C['accent_hover'],
+                      font=ctk.CTkFont(family=FONT, size=12, weight="bold"),
+                      command=self._send_tts).pack(side="left", padx=(10, 0))
 
         self._vc_id = None  # last used channel id
         self._guild_id = None  # last used guild id
@@ -1996,7 +2037,7 @@ class JoinVoicePanel(ActionPanel):
         # Build channel_id list — round-robin assign tokens to channels
         vc_ids = [c['id'] for c in voice_chs]
         assignments = {}  # channel_id -> list of tokens
-        for i, t in enumerate(self.tokens):
+        for i, t in enumerate(self.active_tokens):
             ch = vc_ids[i % len(vc_ids)]
             assignments.setdefault(ch, []).append(t)
 
@@ -2028,10 +2069,10 @@ class JoinVoicePanel(ActionPanel):
     def _join_all(self, channel_ids, guild_id):
         """Join all tokens to a single voice channel."""
         channel_id = channel_ids[0]
-        self.log(f"Joining {len(self.tokens)} tokens to voice...", 'accent')
+        self.log(f"Joining {len(self.active_tokens)} tokens to voice...", 'accent')
 
         threads = []
-        for i, t in enumerate(self.tokens):
+        for i, t in enumerate(self.active_tokens):
             if self.stopped: break
             th = threading.Thread(target=self._connect_one_to, args=(t, i + 1, channel_id, guild_id), daemon=True)
             th.start()
@@ -2096,7 +2137,7 @@ class JoinVoicePanel(ActionPanel):
 
             ws.send(json.dumps({'op': 4, 'd': {
                 'guild_id': guild_id, 'channel_id': channel_id,
-                'self_mute': True, 'self_deaf': True, 'self_video': False}}))
+                'self_mute': False, 'self_deaf': False, 'self_video': False}}))
 
             deadline = time.time() + 15
             joined_vc = False
@@ -2178,6 +2219,39 @@ class JoinVoicePanel(ActionPanel):
                 self.log(f"  [{idx}] ↻ {uname} reconnecting now", 'cyan')
                 self._connect_one_to(t, idx, channel_id, guild_id, _retry=0 if succeeded else _retry + 1)
 
+    def _send_tts(self):
+        """Send a TTS message to the specified text channel using all currently connected tokens."""
+        ch_id = self.tts_channel_entry.get().strip()
+        msg = self.tts_msg_entry.get().strip()
+        if not ch_id:
+            self.log("Enter a text channel ID for TTS", 'red'); return
+        if not msg:
+            self.log("Enter a TTS message", 'red'); return
+        with self._ws_lock:
+            connected_tokens = list(self._active_ws.keys())
+        if not connected_tokens:
+            self.log("No tokens currently in VC — join first", 'red'); return
+        tok_map = {t.token: t for t in self.tokens}
+        targets = [tok_map[tk] for tk in connected_tokens if tk in tok_map]
+        self.log(f"📢 Sending TTS to #{ch_id} via {len(targets)} token(s)...", 'accent')
+        def _do_tts():
+            sent = 0
+            for t in targets:
+                uname = t.display_name or t.username or t.token[:12]
+                try:
+                    r = _stealth_post(t.token, f'{API}/channels/{ch_id}/messages',
+                                      json_data={'content': msg, 'tts': True}, timeout=10)
+                    if r.status_code == 200:
+                        self.log(f"  ✓ TTS via {uname}", 'green'); sent += 1; break
+                    elif r.status_code == 403:
+                        self.log(f"  · {uname} no perms", 'dim')
+                    else:
+                        self.log(f"  ✗ {uname} ({r.status_code})", 'red')
+                except Exception as e:
+                    self.log(f"  ✗ {uname}: {e}", 'red')
+            self.log(f"📢 TTS done · {sent} sent", 'cyan')
+        threading.Thread(target=_do_tts, daemon=True).start()
+
     def _on_stop(self):
         """Stop all voice connections."""
         self._stop_flag.set()
@@ -2221,8 +2295,8 @@ class FriendBombPanel(ActionPanel):
         threading.Thread(target=self._worker, args=(target,), daemon=True).start()
 
     def _worker(self, target):
-        self.log(f"Friend bombing '{target}' · {len(self.tokens)} tokens", 'accent')
-        for i, t in enumerate(self.tokens):
+        self.log(f"Friend bombing '{target}' · {len(self.active_tokens)} tokens", 'accent')
+        for i, t in enumerate(self.active_tokens):
             if self.stopped: break
             uname = t.display_name or t.username or t.token[:12]
             try:
@@ -2280,9 +2354,9 @@ class StatusChangerPanel(ActionPanel):
         threading.Thread(target=self._worker, args=(text, status), daemon=True).start()
 
     def _worker(self, text, online_status):
-        self.log(f"Setting '{text}' ({online_status}) on {len(self.tokens)} tokens", 'accent')
+        self.log(f"Setting '{text}' ({online_status}) on {len(self.active_tokens)} tokens", 'accent')
         payload = {'custom_status': {'text': text} if text else None}
-        for i, t in enumerate(self.tokens):
+        for i, t in enumerate(self.active_tokens):
             if self.stopped: break
             uname = t.display_name or t.username or t.token[:12]
             try:
@@ -2332,7 +2406,7 @@ class NickChangerPanel(ActionPanel):
 
     def _worker(self, guild_id, nick):
         self.log(f"Setting nick '{nick}' in {guild_id}", 'accent')
-        for i, t in enumerate(self.tokens):
+        for i, t in enumerate(self.active_tokens):
             if self.stopped: break
             uname = t.display_name or t.username or t.token[:12]
             try:
@@ -2379,7 +2453,7 @@ class HypeSquadPanel(ActionPanel):
 
     def _worker(self, house_id):
         self.log(f"Setting HypeSquad house {house_id}", 'accent')
-        for i, t in enumerate(self.tokens):
+        for i, t in enumerate(self.active_tokens):
             if self.stopped: break
             uname = t.display_name or t.username or t.token[:12]
             try:
@@ -2425,8 +2499,8 @@ class LeaveGuildPanel(ActionPanel):
         threading.Thread(target=self._worker, args=(g_id,), daemon=True).start()
 
     def _worker(self, guild_id):
-        self.log(f"Leaving guild {guild_id} · {len(self.tokens)} tokens", 'accent')
-        for i, t in enumerate(self.tokens):
+        self.log(f"Leaving guild {guild_id} · {len(self.active_tokens)} tokens", 'accent')
+        for i, t in enumerate(self.active_tokens):
             if self.stopped: break
             uname = t.display_name or t.username or t.token[:12]
             try:
@@ -2471,8 +2545,8 @@ class BioChangerPanel(ActionPanel):
         threading.Thread(target=self._worker, args=(bio,), daemon=True).start()
 
     def _worker(self, bio):
-        self.log(f"Setting bio on {len(self.tokens)} tokens", 'accent')
-        for i, t in enumerate(self.tokens):
+        self.log(f"Setting bio on {len(self.active_tokens)} tokens", 'accent')
+        for i, t in enumerate(self.active_tokens):
             if self.stopped: break
             uname = t.display_name or t.username or t.token[:12]
             try:
@@ -2516,8 +2590,8 @@ class DisplayNamePanel(ActionPanel):
         threading.Thread(target=self._worker, args=(name,), daemon=True).start()
 
     def _worker(self, name):
-        self.log(f"Setting display name '{name}' on {len(self.tokens)} tokens", 'accent')
-        for i, t in enumerate(self.tokens):
+        self.log(f"Setting display name '{name}' on {len(self.active_tokens)} tokens", 'accent')
+        for i, t in enumerate(self.active_tokens):
             if self.stopped: break
             uname = t.display_name or t.username or t.token[:12]
             try:
