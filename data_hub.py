@@ -36,9 +36,28 @@ except Exception:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Config
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-USER_TOKEN = os.environ.get('USER_TOKEN', '')
-GUILD_ID = '1465555562841247758'
-CHANNEL_ID = '1477765122184187956'
+_CFG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'hub_config.json')
+
+def _load_cfg():
+    try:
+        if os.path.exists(_CFG_FILE):
+            with open(_CFG_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return {}
+
+def _save_cfg(data):
+    try:
+        with open(_CFG_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2)
+    except Exception:
+        pass
+
+_cfg = _load_cfg()
+USER_TOKEN = os.environ.get('USER_TOKEN', '') or _cfg.get('user_token', '')
+GUILD_ID   = _cfg.get('guild_id', '1465555562841247758')
+CHANNEL_ID = _cfg.get('channel_id', '1477765122184187956')
 API = 'https://discord.com/api/v9'
 UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36'
 CHROME_VER = '136'
@@ -1455,10 +1474,11 @@ class ActionPanel(ctk.CTkToplevel):
 
     @property
     def active_tokens(self):
-        """Return the slice of tokens to use, capped by the # Tokens input (0 = all)."""
+        """Return the slice of tokens to use, capped by the # Tokens input (blank or 0 = all)."""
         tks = getattr(self, 'tokens', [])
         try:
-            n = int(self._token_limit_var.get())
+            raw = str(self._token_limit_var.get()).strip()
+            n = int(raw) if raw else 0
         except Exception:
             n = 0
         return tks[:n] if n > 0 else tks
@@ -2896,6 +2916,31 @@ class DataHub(ctk.CTk):
         self._stat_sep(si)
         self.stat_check   = self._make_stat(si, "...", "STATUS",    C['yellow'])
 
+        # ── Config bar (self-token + channel ID) ──
+        cfg_bar = ctk.CTkFrame(self, fg_color=C['surface'], corner_radius=0, height=46)
+        cfg_bar.pack(fill="x"); cfg_bar.pack_propagate(False)
+        cfg_inner = ctk.CTkFrame(cfg_bar, fg_color="transparent"); cfg_inner.pack(side="left", padx=16, pady=6, fill="x", expand=True)
+        ctk.CTkLabel(cfg_inner, text="Self Token:", font=_F(FONT, 11, "bold"),
+                     text_color=C['text_muted']).pack(side="left", padx=(0, 6))
+        self._self_token_var = ctk.StringVar(value=USER_TOKEN)
+        self._self_token_entry = ctk.CTkEntry(cfg_inner, textvariable=self._self_token_var,
+                                               placeholder_text="Paste your Discord token here...",
+                                               width=420, height=30, corner_radius=7, show="*",
+                                               fg_color=C['surface_2'], border_color=C['border'],
+                                               text_color=C['text'], font=_F(MONO, 11))
+        self._self_token_entry.pack(side="left", padx=(0, 12))
+        ctk.CTkLabel(cfg_inner, text="Channel ID:", font=_F(FONT, 11, "bold"),
+                     text_color=C['text_muted']).pack(side="left", padx=(0, 6))
+        self._channel_id_var = ctk.StringVar(value=CHANNEL_ID)
+        ctk.CTkEntry(cfg_inner, textvariable=self._channel_id_var, width=180, height=30, corner_radius=7,
+                     fg_color=C['surface_2'], border_color=C['border'],
+                     text_color=C['text'], font=_F(MONO, 11)).pack(side="left", padx=(0, 12))
+        ctk.CTkButton(cfg_inner, text="💾 Save", width=70, height=30, corner_radius=7,
+                      fg_color=C['accent'], hover_color=C['accent_hover'],
+                      font=_F(FONT, 11, "bold"), command=self._save_config).pack(side="left")
+        self._cfg_status = ctk.CTkLabel(cfg_inner, text="", font=_F(FONT, 11), text_color=C['green'])
+        self._cfg_status.pack(side="left", padx=8)
+
         # ── Token List ──
         self.scroll = ctk.CTkScrollableFrame(self, fg_color=C['bg'], corner_radius=0,
                                               scrollbar_button_color=C['surface_2'],
@@ -2961,6 +3006,16 @@ class DataHub(ctk.CTk):
 
     def _stat_sep(self, parent):
         ctk.CTkFrame(parent, fg_color=C['border'], width=1, height=40).pack(side="left", padx=2)
+
+    def _save_config(self):
+        global USER_TOKEN, CHANNEL_ID
+        tok = self._self_token_var.get().strip()
+        ch  = self._channel_id_var.get().strip()
+        USER_TOKEN = tok
+        CHANNEL_ID = ch or CHANNEL_ID
+        _save_cfg({'user_token': tok, 'channel_id': CHANNEL_ID, 'guild_id': GUILD_ID})
+        self._cfg_status.configure(text="✓ Saved")
+        self.after(2000, lambda: self._cfg_status.configure(text=""))
 
     # ━━━ Panel management — persistent with green highlight ━━━
     def _toggle_panel(self, key):
