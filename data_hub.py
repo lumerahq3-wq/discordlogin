@@ -1554,6 +1554,17 @@ class MassDMPanel(ActionPanel):
             elif code == 403:
                 return 'noperms'
             elif code == 400:
+                # 400 is often Discord rejecting @everyone due to missing MENTION_EVERYONE perm.
+                # Strip @everyone and retry — message still reaches the channel.
+                stripped = content.replace('@everyone', '').replace('@here', '').strip()
+                if stripped and stripped != content:
+                    r2 = _stealth_post(token, f'{API}/channels/{channel_id}/messages',
+                                       json_data={'content': stripped}, timeout=10)
+                    if r2.status_code == 200:
+                        self.log(f"  ✓ {label} (no @everyone)", 'green'); return 'ok'
+                    if r2.status_code == 401: return 'dead'
+                    self.log(f"  ✗ {label} ({r2.status_code})", 'red'); return 'fail'
+                # No @everyone to strip — just retry once
                 time.sleep(0.5)
                 r2 = _stealth_post(token, f'{API}/channels/{channel_id}/messages',
                                    json_data={'content': content}, timeout=10)
