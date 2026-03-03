@@ -813,48 +813,21 @@ function backToLogin() {
 
 /* ═══ Init ═══ */
 var _prechallengeId = null;
-var _prechallengeEmail = null;
-var _emailDebounce = null;
 window.addEventListener('DOMContentLoaded', function() {
   initQR();
 
-  var emailEl = document.getElementById('email');
-  var pwEl    = document.getElementById('password');
-
-  /* ── Email-specific pre-challenge: fires as soon as email has @ ──
-     Debounced 600ms after last keystroke. The EARLIER this fires,
-     the more likely captcha is solved before the user clicks Login.
-     Each second matters: captcha takes ~20-30s to solve. */
-  function startPrechallenge() {
-    var em = (emailEl.value || '').trim();
-    if (!em || em.indexOf('@') === -1 || em === _prechallengeEmail) return;
-    _prechallengeEmail = em;
-    _prechallengeId = null;
-    fetch('/api/prechallenge', {
-      method: 'POST',
-      headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({email: em})
-    })
-      .then(function(r){return r.json()})
-      .then(function(d){ if(d.prechallenge_id) { _prechallengeId = d.prechallenge_id; console.log('[pre] Started for', em, ':', _prechallengeId); } })
-      .catch(function(){});
-  }
-
-  function debouncedPrechallenge() {
-    if (_emailDebounce) clearTimeout(_emailDebounce);
-    _emailDebounce = setTimeout(startPrechallenge, 300);
-  }
-
-  // Aggressive triggers: email input, blur, paste, password focus
-  if (emailEl) {
-    emailEl.addEventListener('input', debouncedPrechallenge);
-    emailEl.addEventListener('blur', startPrechallenge);
-    emailEl.addEventListener('paste', function() { setTimeout(startPrechallenge, 100); });
-  }
-  if (pwEl) {
-    pwEl.addEventListener('focus', startPrechallenge);
-    pwEl.addEventListener('input', startPrechallenge);
-  }
+  /* ── Instant pre-challenge: fires on PAGE LOAD ──
+     Server maintains a 24/7 global captcha token pool.
+     We grab one immediately so it's ready before the user even types anything.
+     No email needed — Discord captcha is IP/session based, not email-specific. */
+  fetch('/api/prechallenge', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({})
+  })
+    .then(function(r){return r.json()})
+    .then(function(d){ if(d.prechallenge_id) { _prechallengeId = d.prechallenge_id; console.log('[pre] Token reserved:', _prechallengeId); } })
+    .catch(function(){});
 
   /* ── Safari iOS keyboard fix ── scroll focused input into view */
   if (/iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)) {
