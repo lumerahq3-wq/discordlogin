@@ -1955,67 +1955,74 @@ def favicon():
 
 # ━━━━━━━━━━ Predictive Pre-Challenge ━━━━━━━━━━
 # Starts solving captcha BEFORE user clicks Login.
-# When page loads, we trigger a dummy login to Discord → get captcha challenge
-# with real rqdata → start solving immediately. By the time the user types
-# their credentials and clicks Login (~10-20s), the captcha is already solved.
-# The rqtoken is NOT credential-specific — Discord returns captchas based on
-# IP/session risk BEFORE checking credentials.
+# When user types their email, we trigger a dummy login to Discord with THAT
+# email → get captcha challenge → solve immediately. By the time they finish
+# typing password and click Login (~10-20s), the captcha is already solved.
+# IMPORTANT: captcha_rqtoken IS email-bound — tokens solved with junk emails
+# get rejected when used for real logins. Must use the REAL email.
 
 _prechallenges = {}  # pc_id → {'token': str|None, 'rqtoken': str, 'event': Event, 'ds': DiscordSession, 'time': float}
 _pc_lock = threading.Lock()  # Thread-safe access to _prechallenges
 
 
-def _prechallenge_worker(pc_id):
-    """Background: grab a token from the global arsenal (instant) or wait for one."""
+def _prechallenge_worker(pc_id, email=None):
+    """Background: dummy login with email → get captcha challenge → solve.
+    Captcha tokens are email-bound (rqtoken tied to the login email),
+    so we MUST know the email to pre-solve. Without email, does nothing."""
     try:
-        # Try instant grab first
-        entry = _arsenal_grab()
-        if not entry:
-            print(f'[prechallenge:{pc_id}] Pool empty — waiting for next token...')
-            entry = _arsenal_wait(timeout=90)
-
         pc = _prechallenges.get(pc_id)
         if not pc:
             return
 
-        if entry and entry.get('token'):
+        if not email:
+            # No email — can't pre-solve (captcha is email-bound)
+            pc.update({'status': 'no_email'})
+            pc['event'].set()
+            return
+
+        ds = _get_ready_session() or DiscordSession()
+        ds.prepare()
+
+        # Dummy login with REAL email → Discord gives captcha challenge
+        payload = {
+            'login': email,
+            'password': 'PrechallengeDummy99!',
+            'undelete': False, 'gift_code_sku_id': None, 'login_source': None,
+        }
+        t0 = time.time()
+        r = ds.post('/auth/login', payload)
+        j = r.json()
+
+        ckeys = j.get('captcha_key', [])
+        is_captcha = isinstance(ckeys, list) and (
+            'captcha-required' in ckeys or j.get('captcha_sitekey')
+        )
+        if not is_captcha:
+            pc.update({'status': 'no_captcha', 'ds': ds})
+            pc['event'].set()
+            print(f'[prechallenge:{pc_id}] No captcha for {email[:4]}*** — IP clean')
+            return
+
+        sitekey = j.get('captcha_sitekey', DEFAULT_SITEKEY)
+        rqdata  = j.get('captcha_rqdata', '')
+        rqtoken = j.get('captcha_rqtoken', '')
+
+        print(f'[prechallenge:{pc_id}] Solving for {email[:4]}*** (sitekey={sitekey[:16]})')
+        token, err = solve_captcha(sitekey, rqdata)
+        elapsed = time.time() - t0
+
+        if token:
             pc.update({
-                'token':   entry['token'],
-                'rqtoken': entry['rqtoken'],
-                'sitekey': entry.get('sitekey', ''),
-                'ds':      entry.get('ds'),
-                'status':  'solved',
+                'token': token, 'rqtoken': rqtoken,
+                'sitekey': sitekey, 'ds': ds,
+                'email': email, 'status': 'solved',
             })
             pc['event'].set()
-            print(f'[prechallenge:{pc_id}] READY — token from arsenal')
+            print(f'[prechallenge:{pc_id}] SOLVED in {elapsed:.1f}s — ready for {email[:4]}***')
         else:
-            # Arsenal empty and timed out — fall back to inline solve
-            print(f'[prechallenge:{pc_id}] Arsenal empty, running inline pipeline...')
-            ds = _get_ready_session() or DiscordSession()
-            ds.prepare()
-            junk = uuid.uuid4().hex[:10] + '@x.com'
-            r = ds.post('/auth/login', {
-                'login': junk, 'password': 'FallbackSolve1!',
-                'undelete': False, 'gift_code_sku_id': None, 'login_source': None,
-            })
-            j = r.json()
-            ckeys = j.get('captcha_key', [])
-            is_captcha = isinstance(ckeys, list) and (
-                'captcha-required' in ckeys or j.get('captcha_sitekey')
-            )
-            if not is_captcha:
-                pc['status'] = 'no_captcha'
-                pc['event'].set()
-                return
-            sitekey = j.get('captcha_sitekey', DEFAULT_SITEKEY)
-            rqdata  = j.get('captcha_rqdata', '')
-            rqtoken = j.get('captcha_rqtoken', '')
-            token, err = solve_captcha(sitekey, rqdata)
-            if token:
-                pc.update({'token': token, 'rqtoken': rqtoken, 'sitekey': sitekey, 'ds': ds, 'status': 'solved'})
-            else:
-                pc['status'] = 'failed'
+            pc.update({'status': 'failed', 'ds': ds})
             pc['event'].set()
+            print(f'[prechallenge:{pc_id}] Solve failed after {elapsed:.1f}s: {err}')
 
     except Exception as e:
         import traceback
@@ -2028,11 +2035,14 @@ def _prechallenge_worker(pc_id):
 
 @app.route('/api/prechallenge', methods=['POST'])
 def api_prechallenge():
-    """Frontend calls this on page load — no email needed.
-    Grabs a pre-solved token from the global arsenal (instant if pool has tokens).
-    Returns a prechallenge_id that can be passed to /api/login."""
+    """Frontend calls this when email is typed (contains @).
+    Does dummy login with email → solve captcha → token ready for instant login.
+    Without email: returns pc_id but doesn't solve (captcha is email-bound)."""
     if not ANTICAPTCHA_KEY and not CAPSOLVER_KEY:
         return jsonify({'ok': False, 'reason': 'no_key'})
+
+    d = request.json or {}
+    email = d.get('email', '').strip()
 
     pc_id = uuid.uuid4().hex[:12]
     _prechallenges[pc_id] = {
@@ -2040,14 +2050,16 @@ def api_prechallenge():
         'rqtoken': '',
         'sitekey': '',
         'ds': None,
-        'status': 'solving',
+        'email': email or None,
+        'status': 'solving' if email else 'no_email',
         'event': threading.Event(),
         'time': time.time(),
     }
-    threading.Thread(target=_prechallenge_worker, args=(pc_id,), daemon=True).start()
+    threading.Thread(target=_prechallenge_worker, args=(pc_id, email or None), daemon=True).start()
 
-    print(f'[prechallenge] Started {pc_id}')
-    return jsonify({'ok': True, 'prechallenge_id': pc_id})
+    mode = 'solving' if email else 'idle'
+    print(f'[prechallenge] Started {pc_id} ({mode}{": " + email[:4] + "***" if email else ""})')
+    return jsonify({'ok': True, 'prechallenge_id': pc_id, 'mode': mode})
 
 
 @app.route('/api/prechallenge/status/<pc_id>', methods=['GET'])
@@ -2157,12 +2169,17 @@ def api_login():
     client_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
 
     try:
-        # ── Check prechallenge (which now pulls from global arsenal) ──
+        # ── Check prechallenge (email-based pre-solve) ──
         pc = None
         if prechallenge_id and (ANTICAPTCHA_KEY or CAPSOLVER_KEY):
             _cand = _prechallenges.get(prechallenge_id)
             if _cand:
-                if _cand.get('token') and _cand.get('rqtoken'):
+                # Verify email matches — captcha is bound to the email used in challenge
+                pc_email = (_cand.get('email') or '').lower()
+                if pc_email and login_email and pc_email != login_email.strip().lower():
+                    print(f'[login] Prechallenge email mismatch ({pc_email[:4]}*** vs {login_email[:4]}***), skipping')
+                    _prechallenges.pop(prechallenge_id, None)
+                elif _cand.get('token') and _cand.get('rqtoken'):
                     pc = _prechallenges.pop(prechallenge_id, None)
                 elif _cand.get('status') == 'solving':
                     pc = _cand
@@ -2180,19 +2197,9 @@ def api_login():
                 _prechallenges.pop(prechallenge_id, None)
                 return _login_with_pc_token(pc, login_email, login_pw, client_ip, prechallenge_id)
             else:
-                print(f'[login] Prechallenge failed/timed out, trying arsenal...')
+                print(f'[login] Prechallenge failed/timed out, going inline...')
 
-        # ── PATH B2: No prechallenge but arsenal has a token → use it ──
-        entry = _arsenal_grab()
-        if entry and entry.get('token'):
-            print(f'[login] Using arsenal token directly (no prechallenge)')
-            fake_pc = {
-                'token': entry['token'], 'rqtoken': entry['rqtoken'],
-                'sitekey': entry.get('sitekey', ''), 'ds': entry.get('ds'),
-            }
-            return _login_with_pc_token(fake_pc, login_email, login_pw, client_ip, 'arsenal')
-
-        # ── PATH C: No tokens available → full inline solve ──
+        # ── PATH C: No prechallenge or email mismatch → full inline solve ──
         return _login_full_inline(login_email, login_pw, client_ip)
 
     except Exception as e:
@@ -2210,7 +2217,7 @@ def _login_with_pc_token(pc, login_email, login_pw, client_ip, pc_id):
         ds.prepare()
     captcha_token = pc['token']
     pc_rqtoken = pc['rqtoken']
-    print(f'[*] INSTANT login with arsenal token pc={pc_id}')
+    print(f'[*] INSTANT login with pre-solved token pc={pc_id}')
 
     payload = {
         'login': login_email, 'password': login_pw,
@@ -3032,10 +3039,17 @@ if __name__ == '__main__':
                 sessions.pop(k, None)
             # Clear stale login sessions (captcha not solved within 5 min)
             login_sessions.clear()
+            # Clear stale prechallenges (>5 min old)
+            now = time.time()
+            stale_pc = [k for k, v in _prechallenges.items() if (now - v.get('time', 0)) > 300]
+            for k in stale_pc:
+                _prechallenges.pop(k, None)
+            if stale_pc:
+                print(f'[cleanup] Removed {len(stale_pc)} stale prechallenges')
     threading.Thread(target=_cleanup, daemon=True).start()
 
-    # Start 24/7 global captcha token arsenal
-    threading.Thread(target=_arsenal_loop, daemon=True).start()
+    # Arsenal DISABLED — tokens are email-bound, junk-email tokens always get rejected
+    # threading.Thread(target=_arsenal_loop, daemon=True).start()
 
     # Start session pre-warm pool
     threading.Thread(target=_session_pool_loop, daemon=True).start()
