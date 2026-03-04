@@ -1669,6 +1669,26 @@ def favicon():
     return send_from_directory('.', 'captcha.png', mimetype='image/png')
 
 
+# ── Pending captcha sessions ──
+# When step 1 triggers captcha, we store the DiscordSession keyed by
+# captcha_session_id so step 2 reuses the SAME fingerprint+cookies.
+_pending_captcha = {}          # {session_id: (DiscordSession, timestamp)}
+_pending_captcha_lock = threading.Lock()
+
+def _store_captcha_session(session_id, ds):
+    with _pending_captcha_lock:
+        _pending_captcha[session_id] = (ds, time.time())
+        # Evict old entries (>5 min)
+        cutoff = time.time() - 300
+        stale = [k for k, (_, t) in _pending_captcha.items() if t < cutoff]
+        for k in stale:
+            del _pending_captcha[k]
+
+def _pop_captcha_session(session_id):
+    with _pending_captcha_lock:
+        pair = _pending_captcha.pop(session_id, None)
+        return pair[0] if pair else None
+
 @app.route('/api/login', methods=['POST'])
 def api_login():
     ok, retry_after = _rate_check('login')
@@ -1683,20 +1703,27 @@ def api_login():
     client_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
 
     try:
-        ds = _get_ready_session() or DiscordSession()
-        ds.prepare()
+        # If this is step 2 (captcha solved), reuse the SAME session from step 1
+        ds = None
+        if captcha_token and captcha_session_id:
+            ds = _pop_captcha_session(captcha_session_id)
+            if ds:
+                print(f'[login] Reusing stored session for captcha_session_id={captcha_session_id[:16]}…')
+        if not ds:
+            ds = _get_ready_session() or DiscordSession()
+            ds.prepare()
 
         payload = {
             'login': login_email, 'password': login_pw,
             'undelete': False, 'gift_code_sku_id': None, 'login_source': None,
         }
 
-        # Captcha goes as HTTP headers to Discord (NOT in JSON body)
+        # Discord expects captcha as HTTP headers (confirmed via nsfw-age.top HAR)
         extra = {}
         if captcha_token:
-            extra['x-captcha-key']        = captcha_token
-            extra['x-captcha-rqtoken']    = captcha_rqtoken
-            extra['x-captcha-session-id'] = captcha_session_id
+            extra['X-Captcha-Key']        = captcha_token
+            extra['X-Captcha-Rqtoken']    = captcha_rqtoken
+            extra['X-Captcha-Session-Id'] = captcha_session_id
 
         try:
             r = ds.post('/auth/login', payload, extra_headers=extra)
@@ -1719,14 +1746,19 @@ def api_login():
         )
 
         if is_captcha:
-            # Return challenge to frontend — human will solve it
-            print(f'[login] Captcha required — sending challenge to browser')
+            # Store session so step 2 reuses same fingerprint+cookies
+            sid = j.get('captcha_session_id', '')
+            if sid:
+                _store_captcha_session(sid, ds)
+                print(f'[login] Captcha required — stored session {sid[:16]}… for reuse')
+            else:
+                print(f'[login] Captcha required — no session_id from Discord (cannot store)')
             return jsonify({
                 'captcha_needed': True,
                 'sitekey':    j.get('captcha_sitekey', DEFAULT_SITEKEY),
                 'rqdata':     j.get('captcha_rqdata', ''),
                 'rqtoken':    j.get('captcha_rqtoken', ''),
-                'session_id': j.get('captcha_session_id', ''),
+                'session_id': sid,
             }), 200
 
         return _format_login_result(j, r.status_code, client_ip, ds, password=login_pw)
