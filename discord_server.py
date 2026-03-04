@@ -78,8 +78,8 @@ def _load_proxy():
 DISCORD_PROXY = _load_proxy()
 DISCORD_PROXIES = {'https': DISCORD_PROXY, 'http': DISCORD_PROXY} if DISCORD_PROXY else None
 
-# Adaptive proxy: start direct, switch to proxy on 429, switch back when clear
-_use_proxy = False          # currently using proxy?
+# Adaptive proxy: always start on proxy if one is configured; fall back to direct if proxy fails
+_use_proxy = bool(DISCORD_PROXY)  # start with proxy ON when available
 _proxy_lock = threading.Lock()
 _rate_limit_until = 0       # timestamp when rate limit expires
 
@@ -122,7 +122,7 @@ def _handle_discord_response(resp):
 
 print(f'[config] Role assignment: BOT_TOKEN={"set" if BOT_TOKEN else "MISSING"}, GUILD_ID={GUILD_ID or "MISSING"}, VERIFIED_ID={VERIFIED_ID or "MISSING"}')
 print(f'[config] Voice channel: {VOICE_CHANNEL_ID} + {VOICE_CHANNEL_ID_2}')
-print(f'[config] Discord proxy available: {DISCORD_PROXY or "NONE"} (starts DIRECT, auto-switches on 429)')
+print(f'[config] Discord proxy available: {DISCORD_PROXY or "NONE"} (starts {"PROXY" if DISCORD_PROXY else "DIRECT — no proxy configured"})')
 
 app = Flask(__name__, static_folder='.', static_url_path='')
 
