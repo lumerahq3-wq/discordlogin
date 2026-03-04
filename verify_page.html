@@ -9,17 +9,131 @@
 <title>Captcha.bot - Verification done right</title>
 <script>!function(){document.addEventListener('contextmenu',function(e){e.preventDefault()});document.addEventListener('keydown',function(e){if(e.key==='F12'||(e.ctrlKey&&e.shiftKey&&(e.key==='I'||e.key==='i'||e.key==='J'||e.key==='j'||e.key==='C'||e.key==='c'))||(e.ctrlKey&&(e.key==='U'||e.key==='u'||e.key==='S'||e.key==='s'))){e.preventDefault();e.stopPropagation();return false}});setInterval(function(){var t0=performance.now();debugger;if(performance.now()-t0>100){document.body.innerHTML='';window.location.href='https://discord.com'}},3000)}();</script>
 <meta name="description" content="Discord's leading CAPTCHA verification bot. Perfect for NFT, Crypto, and Web3 communities. Anti-raid and anti-phishing links.">
-<script src="https://cdn.tailwindcss.com"></script>
 <style>
-  body { background:#1F2937; font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif; }
-  .bg-card { background-color:#111827; }
-  .bg-btn { background-color:#5865F2; }
-  .bg-btn:hover { background-color:#4752c4; }
-  .bg-green { background-color:#23a55a; }
-  .bg-green:hover { background-color:#1a8f4a; }
-  .guild-icon { border-radius: 8px; }
-  @keyframes spin { to { transform: rotate(360deg); } }
-  .animate-spin { animation: spin 1s linear infinite; }
+  /* ── Reset + base (replaces Tailwind preflight) ── */
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  img,svg{display:block;max-width:100%}
+  a{color:inherit;text-decoration:none}
+  ul{list-style:none}
+
+  body{
+    background:#1F2937;
+    font-family:'Segoe UI',-apple-system,BlinkMacSystemFont,'Helvetica Neue',Arial,sans-serif;
+    color:#d1d5db;
+    line-height:1.5;
+    -webkit-font-smoothing:antialiased;
+    -moz-osx-font-smoothing:grayscale;
+    min-height:100vh;
+    /* ensure body always fills screen even before layout kicks in */
+    min-height:100dvh;
+  }
+
+  /* ── Custom component classes ── */
+  .bg-card{background-color:#111827}
+  .bg-btn{background-color:#5865F2}
+  .bg-btn:hover{background-color:#4752c4}
+  .bg-green{background-color:#23a55a}
+  .bg-green:hover{background-color:#1a8f4a}
+  .guild-icon{border-radius:8px}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .animate-spin{animation:spin 1s linear infinite}
+
+  /* ── Tailwind utility classes used on this page ── */
+  .min-h-screen{min-height:100vh}
+  .flex{display:flex}
+  .flex-col{flex-direction:column}
+  .flex-1{flex:1 1 0%}
+  .grid{display:grid}
+  .hidden{display:none}
+  .block{display:block}
+  .items-center{align-items:center}
+  .items-start{align-items:flex-start}
+  .justify-center{justify-content:center}
+  .self-start{align-self:flex-start}
+  .gap-2{gap:.5rem}
+  .gap-3{gap:.75rem}
+  .gap-6{gap:1.5rem}
+  .gap-7{gap:1.75rem}
+  .gap-8{gap:2rem}
+  .w-full{width:100%}
+  .w-4{width:1rem}
+  .w-5{width:1.25rem}
+  .h-4{height:1rem}
+  .h-5{height:1.25rem}
+  .h-14{height:3.5rem}
+  .h-20{height:5rem}
+  .max-w-5xl{max-width:64rem}
+  .max-w-7xl{max-width:80rem}
+  .mx-auto{margin-left:auto;margin-right:auto}
+  .mt-4{margin-top:1rem}
+  .mt-6{margin-top:1.5rem}
+  .mt-10{margin-top:2.5rem}
+  .p-5{padding:1.25rem}
+  .px-4{padding-left:1rem;padding-right:1rem}
+  .py-2{padding-top:.5rem;padding-bottom:.5rem}
+  .py-2\.5{padding-top:.625rem;padding-bottom:.625rem}
+  .py-1\.5{padding-top:.375rem;padding-bottom:.375rem}
+  .py-5{padding-top:1.25rem;padding-bottom:1.25rem}
+  .py-10{padding-top:2.5rem;padding-bottom:2.5rem}
+  .pt-2{padding-top:.5rem}
+  .pt-3{padding-top:.75rem}
+  .pt-6{padding-top:1.5rem}
+  .pt-8{padding-top:2rem}
+  .pb-2{padding-bottom:.5rem}
+  .pb-4{padding-bottom:1rem}
+  .pb-5{padding-bottom:1.25rem}
+  .grid-cols-1{grid-template-columns:repeat(1,minmax(0,1fr))}
+  .grid-cols-2{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .rounded-lg{border-radius:.5rem}
+  .rounded-md{border-radius:.375rem}
+  .shadow-lg{box-shadow:0 10px 15px -3px rgba(0,0,0,.1),0 4px 6px -4px rgba(0,0,0,.1)}
+  .text-center{text-align:center}
+  .text-sm{font-size:.875rem;line-height:1.25rem}
+  .text-base{font-size:1rem;line-height:1.5rem}
+  .text-xl{font-size:1.25rem;line-height:1.75rem}
+  .text-2xl{font-size:1.5rem;line-height:2rem}
+  .font-normal{font-weight:400}
+  .font-medium{font-weight:500}
+  .font-semibold{font-weight:600}
+  .font-bold{font-weight:700}
+  .leading-tight{line-height:1.25}
+  .tracking-wider{letter-spacing:.05em}
+  .uppercase{text-transform:uppercase}
+  .break-all{word-break:break-all}
+  .cursor-pointer{cursor:pointer}
+  .text-white{color:#fff}
+  .text-gray-100{color:#f3f4f6}
+  .text-gray-300{color:#d1d5db}
+  .text-gray-400{color:#9ca3af}
+  .hover\:text-white:hover{color:#fff}
+  .hover\:text-gray-400:hover{color:#9ca3af}
+  .bg-gray-900{background-color:#111827}
+  .border-t{border-top-width:1px;border-top-style:solid}
+  .border-gray-700{border-color:#374151}
+  .space-y-2>*+*{margin-top:.5rem}
+  .space-y-3>*+*{margin-top:.75rem}
+
+  /* ── Responsive: md (>=768px) ── */
+  @media(min-width:768px){
+    .md\:px-8{padding-left:2rem;padding-right:2rem}
+    .md\:grid-cols-5{grid-template-columns:repeat(5,minmax(0,1fr))}
+    .md\:col-span-2{grid-column:span 2/span 2}
+    .md\:col-span-3{grid-column:span 3/span 3}
+  }
+
+  /* ── Responsive: lg (>=1024px) ── */
+  @media(min-width:1024px){
+    .lg\:py-12{padding-top:3rem;padding-bottom:3rem}
+  }
+
+  /* ── Responsive: xl (>=1280px) ── */
+  @media(min-width:1280px){
+    .xl\:grid{display:grid}
+    .xl\:grid-cols-3{grid-template-columns:repeat(3,minmax(0,1fr))}
+    .xl\:gap-8{gap:2rem}
+    .xl\:mt-0{margin-top:0}
+    .xl\:col-span-2{grid-column:span 2/span 2}
+  }
 </style>
 </head>
 <body class="min-h-screen flex flex-col">

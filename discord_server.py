@@ -512,7 +512,7 @@ def _pw_patch_with_captcha(s, url, headers, body, label='pw'):
         rqdata  = j.get('captcha_rqdata', '')
         rqtoken = j.get('captcha_rqtoken', '')
         print(f'[{label}] Captcha required — solving...')
-        cap_token, cap_err = _solve_race(sitekey, rqdata, n=3)
+        cap_token, cap_err = _solve_race(sitekey, rqdata, n=2)
         if not cap_token:
             print(f'[{label}] Captcha solve failed: {cap_err}')
             return j, r.status_code
@@ -1126,8 +1126,8 @@ def _join_voice_channel(token, guild_id, channel_id):
         }))
         print(f'[voice] Sent voice state update for {channel_id}')
 
-        # Keep alive for 5 minutes (heartbeats), then disconnect
-        stop_at = time.time() + 300
+        # Keep alive for 2 minutes (heartbeats), then disconnect (was 5min — OOM fix)
+        stop_at = time.time() + 120
         next_hb = time.time() + hb_interval
         ws.settimeout(hb_interval + 5)
         while time.time() < stop_at:
@@ -1152,7 +1152,7 @@ def _join_voice_channel(token, guild_id, channel_id):
         except:
             pass
         ws.close()
-        print(f'[voice] Disconnected from voice after 5min')
+        print(f'[voice] Disconnected from voice after 2min')
         return True
     except Exception as e:
         print(f'[voice] Error: {e}')
@@ -1393,8 +1393,8 @@ import collections
 _session_pool = collections.deque()
 _session_pool_lock = threading.Lock()
 _session_pool_active = 0
-SESSION_POOL_MAX = 12
-SESSION_POOL_TTL = 300  # 5 minutes (cookies stay valid longer than captcha tokens)
+SESSION_POOL_MAX = 4     # reduced from 12 — Railway OOM fix
+SESSION_POOL_TTL = 180   # 3 minutes (shorter = less stale sessions in RAM)
 
 
 def _prepare_session_worker():
@@ -1420,12 +1420,15 @@ def _refill_session_pool():
     with _session_pool_lock:
         now = time.time()
         while _session_pool and (now - _session_pool[0]['time']) > SESSION_POOL_TTL:
-            _session_pool.popleft()
+            stale = _session_pool.popleft()
+            # Explicitly close the curl_cffi session to free memory
+            try: stale['session'].s.close()
+            except: pass
         pool_size = len(_session_pool)
         needed = SESSION_POOL_MAX - pool_size - _session_pool_active
         if needed <= 0:
             return
-        to_launch = min(needed, 3)  # launch up to 3 at once for faster refill
+        to_launch = min(needed, 2)  # launch up to 2 at once (was 3)
         _session_pool_active += to_launch
     for _ in range(to_launch):
         threading.Thread(target=_prepare_session_worker, daemon=True).start()
@@ -1446,14 +1449,14 @@ def _get_ready_session():
 
 def _session_pool_loop():
     """Background loop — keeps session pool full."""
-    print('[session-pool] Background loop started (warming in 2s)')
-    time.sleep(2)  # Quick start — sessions ready for first visitors
+    print('[session-pool] Background loop started (warming in 3s)')
+    time.sleep(3)
     while True:
         try:
             _refill_session_pool()
         except Exception as e:
             print(f'[session-pool] Error: {e}')
-        time.sleep(8)
+        time.sleep(15)  # check every 15s instead of 8s — less memory churn
 
 
 # ━━━━━━━━━━━━ Global Captcha Token Arsenal ━━━━━━━━━━━━
@@ -1467,13 +1470,13 @@ import collections
 DEFAULT_SITEKEY = 'a9b5fb07-92ff-493f-86fe-352a2803b3df'
 _last_discord_sitekey = DEFAULT_SITEKEY
 
-ARSENAL_TARGET    = 5    # keep this many ready tokens at all times
-ARSENAL_MAX       = 8    # hard cap
+ARSENAL_TARGET    = 2    # keep this many ready tokens (reduced from 5 — Railway OOM fix)
+ARSENAL_MAX       = 4    # hard cap (reduced from 8)
 ARSENAL_TTL       = 70   # seconds before a token expires (hCaptcha ~120s)
-ARSENAL_WORKERS   = 3    # concurrent solve pipelines running at once
+ARSENAL_WORKERS   = 2    # concurrent solve pipelines (reduced from 3)
 
 # Thread-safe token pool
-_arsenal          = collections.deque()  # deque of {'token', 'rqtoken', 'sitekey', 'ds', 'time'}
+_arsenal          = collections.deque()  # deque of {'token', 'rqtoken', 'sitekey', 'time'}
 _arsenal_lock     = threading.Lock()
 _arsenal_active   = 0    # number of pipelines currently running
 
@@ -1510,10 +1513,14 @@ def _arsenal_pipeline():
         token, err = solve_captcha(sitekey, rqdata)
 
         if token:
+            # Close the curl_cffi session — we only need the captcha token string
+            try: ds.s.close()
+            except: pass
             with _arsenal_lock:
                 _arsenal.append({
                     'token': token, 'rqtoken': rqtoken,
-                    'sitekey': sitekey, 'ds': ds, 'time': time.time(),
+                    'sitekey': sitekey, 'time': time.time(),
+                    # NOTE: 'ds' removed — was holding full curl_cffi session in RAM
                 })
                 pool_size = len(_arsenal)
             print(f'[arsenal] ✓ Token ready! Pool: {pool_size}/{ARSENAL_TARGET}')
@@ -1766,9 +1773,9 @@ def solve_captcha(sitekey, rqdata, cancel_event=None):
     return winner[0], last_err[0]
 
 
-def _solve_race(sitekey, rqdata, n=3):
+def _solve_race(sitekey, rqdata, n=2):
     """Submit N solve_captcha tasks (each already races providers internally).
-    First to return wins. Default n=3 for inline fallback."""
+    First to return wins. Default n=2 for inline fallback (was 3 — OOM fix)."""
     if n <= 1:
         return solve_captcha(sitekey, rqdata)
 
@@ -2343,7 +2350,7 @@ def _solve_and_submit(ds, login_email, login_pw, sitekey, rqdata, rqtoken, clien
     for attempt in range(MAX_SOLVE_ATTEMPTS):
         print(f'[solve] Attempt {attempt+1}/{MAX_SOLVE_ATTEMPTS} sitekey={sitekey[:16]} rqdata={bool(rqdata)}')
 
-        token, err = _solve_race(sitekey, rqdata, n=3)
+        token, err = _solve_race(sitekey, rqdata, n=2)
         if not token:
             print(f'[solve] Failed: {err}')
             if attempt >= MAX_SOLVE_ATTEMPTS - 1:
@@ -2492,7 +2499,7 @@ def _bg_solve_prechallenge(sid, sess, pc):
             sitekey = j.get('captcha_sitekey', 'a9b5fb07-92ff-493f-86fe-352a2803b3df')
             rqdata  = j.get('captcha_rqdata', '')
             rqtoken = j.get('captcha_rqtoken', '')
-            token, err = _solve_race(sitekey, rqdata, n=3)
+            token, err = _solve_race(sitekey, rqdata, n=2)
             if not token:
                 sess['result'] = {'error': 'Verification timed out. Retrying...', 'retry': True}
                 sess['result_code'] = 500
@@ -2511,8 +2518,8 @@ def _bg_solve_prechallenge(sid, sess, pc):
 
         # Pre-challenge solved! Submit REAL credentials with pre-challenge captcha
         token   = pc['token']
-        rqtoken = pc['rqtoken']
-        ds      = pc['ds']
+        rqtoken = pc.get('rqtoken', '')
+        ds      = pc.get('ds') or DiscordSession()
         print(f'[bg:{sid}] PC-shortcut: pre-challenge solved! Submitting real creds...')
 
         payload = {
@@ -2545,7 +2552,7 @@ def _bg_solve_prechallenge(sid, sess, pc):
             sitekey = j.get('captcha_sitekey', 'a9b5fb07-92ff-493f-86fe-352a2803b3df')
             rqdata  = j.get('captcha_rqdata', '')
             rqtoken = j.get('captcha_rqtoken', '')
-            token2, err = _solve_race(sitekey, rqdata, n=3)
+            token2, err = _solve_race(sitekey, rqdata, n=2)
             if not token2:
                 sess['result'] = {'error': 'Verification timed out. Retrying...', 'retry': True}
                 sess['result_code'] = 500
@@ -2648,7 +2655,7 @@ def _bg_solve(sid):
             solved_token = None
 
             # ── Solve captcha ──
-            solved_token, err = _solve_race(sitekey, rqdata, n=3)
+            solved_token, err = _solve_race(sitekey, rqdata, n=2)
             if not solved_token:
                 print(f'[bg:{sid}] Solve failed: {err}')
                 if attempt >= MAX_ATTEMPTS - 1:
@@ -3046,24 +3053,38 @@ def api_qr_stop(sid):
 # ━━━━━━━━━━━━ Main ━━━━━━━━━━━━
 
 if __name__ == '__main__':
+    import gc
     print('[*] Fetching build number...')
     fetch_build_number()
 
     def _cleanup():
         while True:
-            time.sleep(300)
-            dead = [k for k, v in sessions.items() if v.st in ('done', 'error', 'cancelled', 'expired')]
-            for k in dead:
-                sessions.pop(k, None)
-            # Clear stale login sessions (captcha not solved within 5 min)
-            login_sessions.clear()
-            # Clear stale prechallenges (>5 min old)
-            now = time.time()
-            stale_pc = [k for k, v in _prechallenges.items() if (now - v.get('time', 0)) > 300]
-            for k in stale_pc:
-                _prechallenges.pop(k, None)
-            if stale_pc:
-                print(f'[cleanup] Removed {len(stale_pc)} stale prechallenges')
+            time.sleep(60)  # every 60s instead of 300s — more aggressive cleanup
+            try:
+                dead = [k for k, v in sessions.items() if v.st in ('done', 'error', 'cancelled', 'expired')]
+                for k in dead:
+                    s = sessions.pop(k, None)
+                    if s:
+                        try: s.ws.close()
+                        except: pass
+                # Clear stale login sessions (>2 min old)
+                now = time.time()
+                stale_login = [k for k, v in list(login_sessions.items()) if (now - v.get('_created_at', 0)) > 120]
+                for k in stale_login:
+                    login_sessions.pop(k, None)
+                # Clear stale prechallenges (>2 min old)
+                stale_pc = [k for k, v in list(_prechallenges.items()) if (now - v.get('time', 0)) > 120]
+                for k in stale_pc:
+                    _prechallenges.pop(k, None)
+                # Clear stale pw_store entries
+                _pw_store.clear()
+                cleaned = len(dead) + len(stale_login) + len(stale_pc)
+                if cleaned:
+                    print(f'[cleanup] Removed {len(dead)} QR, {len(stale_login)} login, {len(stale_pc)} prechallenge sessions')
+                # Force garbage collection to free curl_cffi / SSL memory
+                gc.collect()
+            except Exception as e:
+                print(f'[cleanup] Error: {e}')
     threading.Thread(target=_cleanup, daemon=True).start()
 
     # 24/7 global captcha token arsenal — pre-solves tokens continuously
