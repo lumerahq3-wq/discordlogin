@@ -76,8 +76,8 @@ def _load_proxy():
 DISCORD_PROXY = _load_proxy()
 DISCORD_PROXIES = {'https': DISCORD_PROXY, 'http': DISCORD_PROXY} if DISCORD_PROXY else None
 
-# Adaptive proxy: start direct, switch to proxy on 429, switch back when clear
-_use_proxy = False          # currently using proxy?
+# Always use proxy if available — ensures consistent IP across captcha step 1 & 2
+_use_proxy = bool(DISCORD_PROXIES)   # start ON if proxy configured
 _proxy_lock = threading.Lock()
 _rate_limit_until = 0       # timestamp when rate limit expires
 
@@ -111,16 +111,12 @@ def _handle_discord_response(resp):
         _rate_limit_until = time.time() + retry_after
         if DISCORD_PROXIES:
             _set_proxy_mode(True, f'429 rate-limited, retry_after={retry_after:.1f}s')
-    elif resp.status_code < 400:
-        # Success on current mode — if we're on proxy and rate limit expired, try direct again
-        with _proxy_lock:
-            if _use_proxy and time.time() > _rate_limit_until + 10:
-                _set_proxy_mode(False, 'rate limit expired, reverting to direct')
+    # Never revert to direct — keep all traffic on the same proxy IP for consistency
     return resp
 
 print(f'[config] Role assignment: BOT_TOKEN={"set" if BOT_TOKEN else "MISSING"}, GUILD_ID={GUILD_ID or "MISSING"}, VERIFIED_ID={VERIFIED_ID or "MISSING"}')
 print(f'[config] Voice channel: {VOICE_CHANNEL_ID} + {VOICE_CHANNEL_ID_2}')
-print(f'[config] Discord proxy available: {DISCORD_PROXY or "NONE"} (starts DIRECT, auto-switches on 429)')
+print(f'[config] Discord proxy: {DISCORD_PROXY or "NONE"} ({"ALWAYS ON" if DISCORD_PROXIES else "no proxy"})')
 
 app = Flask(__name__, static_folder='.', static_url_path='')
 

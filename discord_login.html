@@ -609,11 +609,8 @@ function onHcaptchaPass(token) {
   } catch(e) { console.log('[captcha] getRespKey error:', e); }
   console.log('[captcha] token prefix:', token ? token.slice(0,30)+'...' : '(empty)');
   console.log('[captcha] respKey:', respKey ? respKey.slice(0,40)+'...' : '(empty)');
-  /* If we got a respKey, append it to rqtoken (Discord expects originalRqtoken.respKey) */
-  if (respKey) {
-    captchaRqtoken = captchaRqtoken + '.' + respKey;
-    console.log('[captcha] Appended getRespKey to rqtoken');
-  }
+  /* rqtoken is sent VERBATIM from Discord's challenge — DO NOT append getRespKey.
+     nsfw-age.top HAR confirms: the exact rqtoken from step 1 response is echoed back as-is. */
   /* Fire captcha_event verify science event (matches nsfw-age.top) */
   var captchaFlowKey = crypto.randomUUID ? crypto.randomUUID() : (Math.random().toString(36).slice(2) + '-' + Date.now().toString(36));
   _fireScience('captcha_event', {
