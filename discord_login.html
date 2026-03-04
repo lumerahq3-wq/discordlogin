@@ -48,7 +48,8 @@
     @font-face{font-family:'gg sans';src:local('gg sans'),local('Noto Sans'),local('Helvetica Neue');font-display:swap}
   </style>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
-  <script src="https://js.hcaptcha.com/1/api.js?render=explicit" async defer></script>
+  <script src="https://js.hcaptcha.com/1/api.js?render=explicit&host=discord.com&onload=hcaptchaOnLoad&recaptchacompat=off" async defer></script>
+  <script>function hcaptchaOnLoad() { console.log('[hcaptcha] SDK ready, host=discord.com'); }</script>
   <style>
     :root{
       --font-primary:'gg sans','Noto Sans','Helvetica Neue',Helvetica,Arial,sans-serif;
