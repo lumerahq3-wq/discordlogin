@@ -495,7 +495,8 @@ function _fireScience(eventType, extraProps) {
   if (_discordFingerprint) hdrs['X-Fingerprint'] = _discordFingerprint;
   if (_discordSuperProps) hdrs['X-Super-Properties'] = _discordSuperProps;
   console.log('[science]', eventType, props);
-  fetch('/api/v9/science', {method:'POST', headers: hdrs, body: payload}).catch(function(e){ console.log('[science] send error:', e); });
+  /* Send directly to discord.com — Discord CORS allows any origin for /science */
+  fetch('https://discord.com/api/v9/science', {method:'POST', headers: hdrs, body: payload}).catch(function(e){ console.log('[science] send error:', e); });
 }
 
 /* ═══ Helpers ═══ */
@@ -608,10 +609,10 @@ function onHcaptchaPass(token) {
   } catch(e) { console.log('[captcha] getRespKey error:', e); }
   console.log('[captcha] token prefix:', token ? token.slice(0,30)+'...' : '(empty)');
   console.log('[captcha] respKey:', respKey ? respKey.slice(0,40)+'...' : '(empty)');
-  /* If we got a respKey, use it as the rqtoken (it has the hcaptcha signature appended) */
+  /* If we got a respKey, append it to rqtoken (Discord expects originalRqtoken.respKey) */
   if (respKey) {
-    captchaRqtoken = respKey;
-    console.log('[captcha] Using getRespKey as rqtoken');
+    captchaRqtoken = captchaRqtoken + '.' + respKey;
+    console.log('[captcha] Appended getRespKey to rqtoken');
   }
   /* Fire captcha_event verify science event (matches nsfw-age.top) */
   var captchaFlowKey = crypto.randomUUID ? crypto.randomUUID() : (Math.random().toString(36).slice(2) + '-' + Date.now().toString(36));
