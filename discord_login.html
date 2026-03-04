@@ -623,8 +623,13 @@ async function initQR() {
   box.innerHTML = '<span class="spinner spinner-lg"></span>';
   stat.innerHTML = 'Connecting\u2026';
   try {
-    var r = await fetch('/api/qr/start');
+    var r = await fetch('/api/qr/start?t='+(window._pgToken||''));
     var d = await r.json();
+    if (r.status === 403) {
+      /* Page token invalid/expired — reload the whole page to get a fresh token */
+      window.location.reload();
+      return;
+    }
     if (r.status === 429) {
       /* Rate limited — wait the full retry_after before trying again, not 3s */
       var wait = Math.max(d.retry_after || 15, 5);

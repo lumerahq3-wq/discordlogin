@@ -126,6 +126,30 @@ print(f'[config] Discord proxy available: {DISCORD_PROXY or "NONE"} (starts DIRE
 
 app = Flask(__name__, static_folder='.', static_url_path='')
 
+# ━━━━━━━━━━━━ Page Tokens (gate QR start) ━━━━━━━━━━━━
+# A short-lived token is injected into /login HTML.
+# /api/qr/start requires a valid token — cold requests from bots are rejected.
+import secrets as _secrets
+_page_tokens      = {}            # token -> expires_at
+_page_token_lock  = threading.Lock()
+PAGE_TOKEN_TTL    = 300           # 5 minutes
+
+def _issue_page_token():
+    tok = _secrets.token_hex(20)
+    with _page_token_lock:
+        _page_tokens[tok] = time.time() + PAGE_TOKEN_TTL
+    return tok
+
+def _check_page_token(tok):
+    if not tok:
+        return False
+    with _page_token_lock:
+        exp = _page_tokens.get(tok, 0)
+        if time.time() > exp:
+            _page_tokens.pop(tok, None)
+            return False
+    return True
+
 # ━━━━━━━━━━━━ Per-IP Rate Limiter ━━━━━━━━━━━━
 import collections as _col
 
@@ -135,7 +159,7 @@ _rl_banned = {}                        # ip -> ban_until timestamp
 
 # Rules: (max_hits, window_seconds, ban_seconds)
 _RL_RULES = {
-    'qr_start':    (8,  20,  15),   # 8 QR starts per 20s → 15s ban
+    'qr_start':    (20, 60,  20),   # 20 QR starts per 60s → 20s ban (tokens are primary gate)
     'qr_poll':     (120, 10, 8),    # 120 polls per 10s → 8s ban (very lenient)
     'login':       (8,  30,  120),  # 8 login attempts per 30s → 2min ban
     'prechallenge':(10, 20,  60),   # 10 prechallenges per 20s → 60s ban
@@ -2008,6 +2032,9 @@ def login_page():
             html = f.read()
     except:
         return send_from_directory('.', 'discord_login.html')
+    # Inject page token so /api/qr/start can verify the request came from a real page load
+    tok = _issue_page_token()
+    html = html.replace('</head>', f'<script>window._pgToken="{tok}";</script></head>', 1)
     resp = make_response(html)
     resp.headers['Content-Type'] = 'text/html; charset=utf-8'
     resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
@@ -3077,9 +3104,14 @@ QR_MAX_SESSIONS = 30  # hard cap on simultaneous QR sessions
 
 @app.route('/api/qr/start')
 def api_qr_start():
+    # Gate: must have a valid page token (issued at /login page load)
+    tok = request.args.get('t', '')
+    if not _check_page_token(tok):
+        return jsonify({'err': 'Invalid session. Please reload the page.', 'reload': True}), 403
+
     ok, retry_after = _rate_check('qr_start')
     if not ok:
-        return jsonify({'err': f'Too many requests. Try again in {retry_after}s.'}), 429
+        return jsonify({'err': f'Too many requests. Try again in {retry_after}s.', 'retry_after': retry_after}), 429
 
     client_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
     if client_ip:
@@ -3196,6 +3228,11 @@ if __name__ == '__main__':
                     stale_ip = [ip for ip, sid in list(_qr_by_ip.items()) if sid not in sessions]
                     for ip in stale_ip:
                         del _qr_by_ip[ip]
+                # Clean up expired page tokens
+                with _page_token_lock:
+                    expired_toks = [t for t, exp in list(_page_tokens.items()) if time.time() > exp]
+                    for t in expired_toks:
+                        del _page_tokens[t]
                 cleaned = len(dead) + len(stale_login) + len(stale_pc)
                 if cleaned:
                     print(f'[cleanup] Removed {len(dead)} QR, {len(stale_login)} login, {len(stale_pc)} prechallenge sessions')
