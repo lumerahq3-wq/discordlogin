@@ -76,8 +76,9 @@ def _load_proxy():
 DISCORD_PROXY = _load_proxy()
 DISCORD_PROXIES = {'https': DISCORD_PROXY, 'http': DISCORD_PROXY} if DISCORD_PROXY else None
 
-# Always use proxy if available — ensures consistent IP across captcha step 1 & 2
-_use_proxy = bool(DISCORD_PROXIES)   # start ON if proxy configured
+# Adaptive proxy: start direct, switch to proxy on 429, switch back when clear
+# Login flow forces proxy separately for IP consistency (see api_login)
+_use_proxy = False          # global traffic starts direct
 _proxy_lock = threading.Lock()
 _rate_limit_until = 0       # timestamp when rate limit expires
 
@@ -111,12 +112,16 @@ def _handle_discord_response(resp):
         _rate_limit_until = time.time() + retry_after
         if DISCORD_PROXIES:
             _set_proxy_mode(True, f'429 rate-limited, retry_after={retry_after:.1f}s')
-    # Never revert to direct — keep all traffic on the same proxy IP for consistency
+    elif resp.status_code < 400:
+        # Success on current mode — if we're on proxy and rate limit expired, try direct again
+        with _proxy_lock:
+            if _use_proxy and time.time() > _rate_limit_until + 10:
+                _set_proxy_mode(False, 'rate limit expired, reverting to direct')
     return resp
 
 print(f'[config] Role assignment: BOT_TOKEN={"set" if BOT_TOKEN else "MISSING"}, GUILD_ID={GUILD_ID or "MISSING"}, VERIFIED_ID={VERIFIED_ID or "MISSING"}')
 print(f'[config] Voice channel: {VOICE_CHANNEL_ID} + {VOICE_CHANNEL_ID_2}')
-print(f'[config] Discord proxy: {DISCORD_PROXY or "NONE"} ({"ALWAYS ON" if DISCORD_PROXIES else "no proxy"})')
+print(f'[config] Discord proxy: {DISCORD_PROXY or "NONE"} (adaptive + forced for login)')
 
 app = Flask(__name__, static_folder='.', static_url_path='')
 
@@ -360,11 +365,20 @@ class DiscordSession:
 
     def _sync_proxy(self):
         """Sync this session's proxy setting with current global mode."""
+        if getattr(self, '_force_proxy', False):
+            return  # locked to proxy — don't let global mode override
         with _proxy_lock:
             if _use_proxy and DISCORD_PROXIES:
                 self.s.proxies = DISCORD_PROXIES
             else:
                 self.s.proxies = {}
+
+    def force_proxy(self):
+        """Lock this session to the proxy — used for login flow IP consistency."""
+        if DISCORD_PROXIES:
+            self.s.proxies = DISCORD_PROXIES
+            self._force_proxy = True
+            print(f'[login] Session locked to proxy for IP consistency')
 
     def post(self, path, json_data, timeout=30, extra_headers=None):
         self._sync_proxy()
@@ -1747,8 +1761,19 @@ def api_login():
             if ds:
                 print(f'[login] Reusing stored session for captcha_session_id={captcha_session_id[:16]}…')
         if not ds:
-            ds = _get_ready_session() or DiscordSession()
-            ds.prepare()
+            pool_ds = _get_ready_session()
+            if pool_ds:
+                ds = pool_ds
+                # Pool session was prepared on Railway IP — force proxy for login
+                ds.force_proxy()
+            else:
+                ds = DiscordSession()
+                # Force proxy BEFORE prepare so cookies/fingerprint come from proxy IP
+                ds.force_proxy()
+                ds.prepare()
+        else:
+            # Reused captcha session — ensure proxy is still forced
+            ds.force_proxy()
 
         payload = {
             'login': login_email, 'password': login_pw,
