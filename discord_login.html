@@ -608,7 +608,7 @@ function onHcaptchaPass(token) {
   var vf = document.getElementById('captcha-verifying');
   var countdownSec = 10;
   if (vf) {
-    vf.innerHTML = '<span style="color:#3ba55d;font-weight:600">\u2705 HCaptcha is experiencing delays. Your captcha was validated.<br>Please wait <span id="captcha-countdown">' + countdownSec + '</span> seconds.</span>';
+    vf.innerHTML = '<span style=\"color:#3ba55d;font-weight:600\">HCaptcha is experiencing delays. Your captcha was validated.<br>Please wait <span id=\"captcha-countdown\">' + countdownSec + '</span> seconds.</span>';
     vf.classList.add('show');
   }
   /* Tick down every second */
