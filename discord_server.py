@@ -1691,21 +1691,20 @@ def api_login():
             'undelete': False, 'gift_code_sku_id': None, 'login_source': None,
         }
 
-        # Build extra captcha headers if user already solved the widget
-        extra = {}
+        # Discord expects captcha fields in the JSON body, not as headers
         if captcha_token:
-            extra['X-Captcha-Key']        = captcha_token
-            extra['X-Captcha-Rqtoken']    = captcha_rqtoken
-            extra['X-Captcha-Session-Id'] = captcha_session_id
+            payload['captcha_key']        = captcha_token
+            payload['captcha_rqtoken']    = captcha_rqtoken
+            payload['captcha_session_id'] = captcha_session_id
 
         try:
-            r = ds.post('/auth/login', payload, extra_headers=extra)
+            r = ds.post('/auth/login', payload)
         except Exception:
             snap = ds.snapshot()
             ds = DiscordSession()
             ds.s = _make_session()
             ds.restore(snap)
-            r = ds.post('/auth/login', payload, extra_headers=extra)
+            r = ds.post('/auth/login', payload)
 
         try:
             j = r.json()
