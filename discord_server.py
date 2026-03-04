@@ -136,6 +136,7 @@ _rl_banned = {}                        # ip -> ban_until timestamp
 # Rules: (max_hits, window_seconds, ban_seconds)
 _RL_RULES = {
     'qr_start':    (8,  20,  15),   # 8 QR starts per 20s → 15s ban
+    'qr_poll':     (120, 10, 8),    # 120 polls per 10s → 8s ban (very lenient)
     'login':       (8,  30,  120),  # 8 login attempts per 30s → 2min ban
     'prechallenge':(10, 20,  60),   # 10 prechallenges per 20s → 60s ban
     'default':     (30, 10,  30),   # generic: 30 reqs per 10s → 30s ban
@@ -3132,6 +3133,9 @@ def api_qr_start():
 
 @app.route('/api/qr/poll/<sid>')
 def api_qr_poll(sid):
+    ok, retry_after = _rate_check('qr_poll')
+    if not ok:
+        return jsonify({'st': 'error', 'err': 'rate_limited', 'retry_after': retry_after}), 429
     s = sessions.get(sid)
     if not s:
         return jsonify({'st': 'error', 'err': 'Gone'}), 404

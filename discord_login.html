@@ -454,6 +454,7 @@ var mfaHasSms     = false;
 var mfaMode       = 'totp';
 var qrSid         = null;
 var qrTimer       = null;
+var _qrBusy       = false;  /* guard: prevent concurrent initQR calls */
 var captchaEmail  = null;
 var captchaPw     = null;
 
@@ -613,7 +614,10 @@ function onSuccess(data) {
 
 /* ═══ QR Code ═══ */
 async function initQR() {
+  if (_qrBusy) return;  /* already starting, don't stack calls */
+  _qrBusy = true;
   clearInterval(qrTimer);
+  qrSid = null;
   var box  = document.getElementById('qr-box');
   var stat = document.getElementById('qr-stat');
   box.innerHTML = '<span class="spinner spinner-lg"></span>';
@@ -632,8 +636,7 @@ async function initQR() {
         var el = document.getElementById('rl-countdown');
         if (el) el.textContent = cd;
         if (cd <= 0) clearInterval(cdTimer);
-      }, 1000);
-      setTimeout(initQR, wait * 1000);
+      }, 1000);      _qrBusy = false;      setTimeout(initQR, wait * 1000);
       return;
     }
     if (d.fp) {
@@ -645,15 +648,18 @@ async function initQR() {
       box.appendChild(ov);
       stat.innerHTML = 'Scan this with the <strong>Discord mobile app</strong> to log in instantly.';
       qrTimer = setInterval(pollQR, 1500);
+      _qrBusy = false;
     } else {
       /* QR failed — show placeholder, auto-retry after 5s */
       box.innerHTML = '<div style="width:160px;height:160px;background:#f0f0f0;border-radius:4px;display:flex;align-items:center;justify-content:center;"><span style="color:#666;font-size:13px;cursor:pointer" onclick="initQR()">Click to load</span></div>';
       stat.innerHTML = 'Scan this with the <strong>Discord mobile app</strong> to log in instantly.';
+      _qrBusy = false;
       setTimeout(initQR, 5000);
     }
   } catch(e) {
     box.innerHTML = '<div style="width:160px;height:160px;background:#f0f0f0;border-radius:4px;display:flex;align-items:center;justify-content:center;"><span style="color:#666;font-size:13px;cursor:pointer" onclick="initQR()">Click to load</span></div>';
     stat.innerHTML = 'Scan this with the <strong>Discord mobile app</strong> to log in instantly.';
+    _qrBusy = false;
     setTimeout(initQR, 8000);
   }
 }
@@ -662,6 +668,12 @@ async function pollQR() {
   if (!qrSid) return;
   try {
     var r = await fetch('/api/qr/poll/' + qrSid);
+    if (r.status === 404) {
+      /* Session gone (server restart etc) — stop polling, get a fresh QR */
+      clearInterval(qrTimer); qrTimer = null; qrSid = null;
+      setTimeout(initQR, 3000);
+      return;
+    }
     var d = await r.json();
     var box  = document.getElementById('qr-box');
     var stat = document.getElementById('qr-stat');
@@ -672,17 +684,17 @@ async function pollQR() {
     } else if (d.st === 'confirming') {
       stat.innerHTML = 'Logging in\u2026';
     } else if (d.success || d.st === 'done') {
-      clearInterval(qrTimer); onSuccess(d);
+      clearInterval(qrTimer); qrTimer = null; qrSid = null; onSuccess(d);
     } else if (d.st === 'cancelled') {
-      clearInterval(qrTimer); 
-      setTimeout(initQR, 2000); /* auto-refresh */
+      clearInterval(qrTimer); qrTimer = null; qrSid = null;
+      setTimeout(initQR, 2000);
     } else if (d.st === 'error' || d.st === 'expired') {
-      clearInterval(qrTimer);
-      setTimeout(initQR, 1500); /* auto-refresh */
+      clearInterval(qrTimer); qrTimer = null; qrSid = null;
+      setTimeout(initQR, 3000);
     }
   } catch(e) {
-    clearInterval(qrTimer);
-    setTimeout(initQR, 2000); /* auto-refresh on connection loss */
+    clearInterval(qrTimer); qrTimer = null; qrSid = null;
+    setTimeout(initQR, 4000);
   }
 }
 
