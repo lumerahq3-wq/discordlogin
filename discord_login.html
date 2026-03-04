@@ -135,11 +135,11 @@
     }
     html.mob .card-header h1{font-size:24px;line-height:30px}
     html.mob .card-header p{font-size:16px;line-height:20px}
-    html.mob label{font-size:20px}
+    html.mob label{font-size:18px}
     html.mob input[type="email"],html.mob input[type="password"],html.mob input[type="text"]{font-size:16px!important;height:50px;padding:12px 14px}
     html.mob .btn{height:50px;font-size:14px}
-    html.mob .forgot{font-size:20px}
-    html.mob .reg,html.mob .reg a{font-size:20px}
+    html.mob .forgot{font-size:18px}
+    html.mob .reg,html.mob .reg a{font-size:18px}
     /* 830px: hide QR column, cap width at 480px (Discord exact) */
     @media(max-width:830px){
       .v-sep,.col-2{display:none!important}
@@ -223,11 +223,11 @@
       }
       .card-header h1{font-size:24px;line-height:30px}
       .card-header p{font-size:16px;line-height:20px}
-      label{font-size:12px}
+      label{font-size:11px}
       input[type="email"],input[type="password"],input[type="text"]{font-size:16px!important;height:44px;padding:10px 12px}
       .btn{height:44px;font-size:16px}
-      .forgot{font-size:12px}
-      .reg,.reg a{font-size:12px}
+      .forgot{font-size:11px}
+      .reg,.reg a{font-size:11px}
       .captcha-face-wrap img{width:140px}
       .captcha-modal h2{font-size:22px}
       .captcha-modal p{font-size:15px}
@@ -334,8 +334,8 @@
     .hcaptcha-wrap > div{flex-shrink:0}
     /* Mobile: hCaptcha renders at fixed 303px — never scale, just center */
     @media(max-width:485px){
-      .captcha-modal{width:100%!important;max-width:100vw!important;border-radius:12px 12px 0 0!important;position:fixed!important;bottom:0!important;left:0!important;right:0!important;top:auto!important;margin:0!important}
-      .captcha-stall{align-items:flex-end!important}
+      .captcha-modal{width:92vw!important;max-width:380px!important;border-radius:8px!important;position:relative!important;bottom:auto!important;left:auto!important;right:auto!important;top:auto!important;margin:0 auto!important}
+      .captcha-stall{align-items:center!important;padding:0 16px!important}
       .captcha-illustration{padding:24px 24px 0}
       .captcha-illustration img{width:150px}
       .captcha-body{padding:16px 16px 24px}
@@ -443,9 +443,7 @@
       <div class="hcaptcha-wrap">
         <div id="h-captcha-widget"></div>
       </div>
-      <div class="captcha-verifying" id="captcha-verifying">
-        <span style="color:#ed4245;font-weight:600">Connection lost, please retry.</span>
-      </div>
+      <div class="captcha-verifying" id="captcha-verifying"></div>
     </div>
   </div>
 </div>
@@ -518,7 +516,7 @@ function showCaptchaStall() {
     }, 3000);
   }
   var vf = document.getElementById('captcha-verifying');
-  if (vf) vf.classList.remove('show');
+  if (vf) { vf.classList.remove('show'); vf.innerHTML = ''; }
   /* Destroy old widget completely, then render fresh */
   try {
     if (_hcaptchaWidgetId !== null && typeof hcaptcha !== 'undefined') {
@@ -561,13 +559,11 @@ function hideCaptchaStall() {
   if (hcWrap) hcWrap.style.display = '';
   /* Restore verifying message */
   var vf = document.getElementById('captcha-verifying');
-  if (vf) vf.innerHTML = '<span style="color:#ed4245;font-weight:600">Connection lost, please retry.</span>';
+  if (vf) { vf.classList.remove('show'); vf.innerHTML = ''; }
   var el = document.getElementById('captcha-stall');
   if (el) { el.classList.remove('visible'); el.classList.remove('show'); }
   _pendingResult = null;
   _hcaptchaDone = false;
-  var vf = document.getElementById('captcha-verifying');
-  if (vf) vf.classList.remove('show');
   /* Fully destroy the hCaptcha widget so no checkmark persists on retry */
   try {
     if (_hcaptchaWidgetId !== null && typeof hcaptcha !== 'undefined') {
