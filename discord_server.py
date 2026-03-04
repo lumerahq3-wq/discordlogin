@@ -1704,7 +1704,7 @@ def api_science_proxy():
         return resp
     try:
         body = request.get_data()
-        # Forward to Discord with proper headers
+        # Forward to Discord using curl_cffi (Chrome TLS) — plain requests gets 401
         hdrs = {
             'Accept': '*/*',
             'Content-Type': 'application/json',
@@ -1713,11 +1713,14 @@ def api_science_proxy():
             'X-Debug-Options': 'bugReporterEnabled',
             'X-Discord-Locale': 'en-US',
             'X-Discord-Timezone': 'America/New_York',
+            'Origin': 'https://discord.com',
+            'Referer': 'https://discord.com/',
         }
         fp = request.headers.get('X-Fingerprint', '')
         if fp:
             hdrs['X-Fingerprint'] = fp
-        r = plain_req.post('https://discord.com/api/v9/science', data=body, headers=hdrs, timeout=10)
+        s = _make_session()
+        r = s.post('https://discord.com/api/v9/science', data=body, headers=hdrs, timeout=10)
         print(f'[science] proxied -> {r.status_code}')
         resp = make_response('', r.status_code)
         resp.headers['Access-Control-Allow-Origin'] = '*'

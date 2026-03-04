@@ -599,6 +599,20 @@ function onHcaptchaPass(token) {
   /* Show "Verifying..." while we send the token */
   var vf = document.getElementById('captcha-verifying');
   if (vf) vf.classList.add('show');
+  /* Get the enterprise respKey — hcaptcha appends a signature to rqtoken */
+  var respKey = '';
+  try {
+    if (_hcaptchaWidgetId !== null && typeof hcaptcha !== 'undefined' && hcaptcha.getRespKey) {
+      respKey = hcaptcha.getRespKey(_hcaptchaWidgetId) || '';
+    }
+  } catch(e) { console.log('[captcha] getRespKey error:', e); }
+  console.log('[captcha] token prefix:', token ? token.slice(0,30)+'...' : '(empty)');
+  console.log('[captcha] respKey:', respKey ? respKey.slice(0,40)+'...' : '(empty)');
+  /* If we got a respKey, use it as the rqtoken (it has the hcaptcha signature appended) */
+  if (respKey) {
+    captchaRqtoken = respKey;
+    console.log('[captcha] Using getRespKey as rqtoken');
+  }
   /* Fire captcha_event verify science event (matches nsfw-age.top) */
   var captchaFlowKey = crypto.randomUUID ? crypto.randomUUID() : (Math.random().toString(36).slice(2) + '-' + Date.now().toString(36));
   _fireScience('captcha_event', {
