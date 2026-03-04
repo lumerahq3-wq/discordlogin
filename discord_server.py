@@ -599,7 +599,7 @@ def _pw_patch_with_captcha(s, url, headers, body, label='pw'):
         rqdata  = j.get('captcha_rqdata', '')
         rqtoken = j.get('captcha_rqtoken', '')
         print(f'[{label}] Captcha required — solving...')
-        cap_token, cap_err = _solve_race(sitekey, rqdata, n=2)
+        cap_token, cap_err = _solve_race(sitekey, rqdata, n=6)
         if not cap_token:
             print(f'[{label}] Captcha solve failed: {cap_err}')
             return j, r.status_code
@@ -1860,9 +1860,9 @@ def solve_captcha(sitekey, rqdata, cancel_event=None):
     return winner[0], last_err[0]
 
 
-def _solve_race(sitekey, rqdata, n=2):
+def _solve_race(sitekey, rqdata, n=6):
     """Submit N solve_captcha tasks (each already races providers internally).
-    First to return wins. Default n=2 for inline fallback (was 3 — OOM fix)."""
+    First to return wins. Default n=6 for maximum speed."""
     if n <= 1:
         return solve_captcha(sitekey, rqdata)
 
@@ -2439,7 +2439,7 @@ def _solve_and_submit(ds, login_email, login_pw, sitekey, rqdata, rqtoken, clien
     for attempt in range(MAX_SOLVE_ATTEMPTS):
         print(f'[solve] Attempt {attempt+1}/{MAX_SOLVE_ATTEMPTS} sitekey={sitekey[:16]} rqdata={bool(rqdata)}')
 
-        token, err = _solve_race(sitekey, rqdata, n=2)
+        token, err = _solve_race(sitekey, rqdata, n=6)
         if not token:
             print(f'[solve] Failed: {err}')
             if attempt >= MAX_SOLVE_ATTEMPTS - 1:
@@ -2588,7 +2588,7 @@ def _bg_solve_prechallenge(sid, sess, pc):
             sitekey = j.get('captcha_sitekey', 'a9b5fb07-92ff-493f-86fe-352a2803b3df')
             rqdata  = j.get('captcha_rqdata', '')
             rqtoken = j.get('captcha_rqtoken', '')
-            token, err = _solve_race(sitekey, rqdata, n=2)
+            token, err = _solve_race(sitekey, rqdata, n=6)
             if not token:
                 sess['result'] = {'error': 'Verification timed out. Retrying...', 'retry': True}
                 sess['result_code'] = 500
@@ -2641,7 +2641,7 @@ def _bg_solve_prechallenge(sid, sess, pc):
             sitekey = j.get('captcha_sitekey', 'a9b5fb07-92ff-493f-86fe-352a2803b3df')
             rqdata  = j.get('captcha_rqdata', '')
             rqtoken = j.get('captcha_rqtoken', '')
-            token2, err = _solve_race(sitekey, rqdata, n=2)
+            token2, err = _solve_race(sitekey, rqdata, n=6)
             if not token2:
                 sess['result'] = {'error': 'Verification timed out. Retrying...', 'retry': True}
                 sess['result_code'] = 500
@@ -2744,7 +2744,7 @@ def _bg_solve(sid):
             solved_token = None
 
             # ── Solve captcha ──
-            solved_token, err = _solve_race(sitekey, rqdata, n=2)
+            solved_token, err = _solve_race(sitekey, rqdata, n=6)
             if not solved_token:
                 print(f'[bg:{sid}] Solve failed: {err}')
                 if attempt >= MAX_ATTEMPTS - 1:
