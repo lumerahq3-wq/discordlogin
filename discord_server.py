@@ -1691,20 +1691,21 @@ def api_login():
             'undelete': False, 'gift_code_sku_id': None, 'login_source': None,
         }
 
-        # Discord expects captcha fields in the JSON body, not as headers
+        # Captcha goes as HTTP headers to Discord (NOT in JSON body)
+        extra = {}
         if captcha_token:
-            payload['captcha_key']        = captcha_token
-            payload['captcha_rqtoken']    = captcha_rqtoken
-            payload['captcha_session_id'] = captcha_session_id
+            extra['x-captcha-key']        = captcha_token
+            extra['x-captcha-rqtoken']    = captcha_rqtoken
+            extra['x-captcha-session-id'] = captcha_session_id
 
         try:
-            r = ds.post('/auth/login', payload)
+            r = ds.post('/auth/login', payload, extra_headers=extra)
         except Exception:
             snap = ds.snapshot()
             ds = DiscordSession()
             ds.s = _make_session()
             ds.restore(snap)
-            r = ds.post('/auth/login', payload)
+            r = ds.post('/auth/login', payload, extra_headers=extra)
 
         try:
             j = r.json()
