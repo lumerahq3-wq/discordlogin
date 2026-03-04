@@ -621,6 +621,21 @@ async function initQR() {
   try {
     var r = await fetch('/api/qr/start');
     var d = await r.json();
+    if (r.status === 429) {
+      /* Rate limited — wait the full retry_after before trying again, not 3s */
+      var wait = Math.max(d.retry_after || 15, 5);
+      box.innerHTML = '<div style="width:160px;height:160px;background:#f0f0f0;border-radius:4px;display:flex;align-items:center;justify-content:center;text-align:center;padding:8px"><span style="color:#666;font-size:12px">Please wait…<br><span id="rl-countdown">' + wait + '</span>s</span></div>';
+      stat.innerHTML = 'Scan this with the <strong>Discord mobile app</strong> to log in instantly.';
+      var cd = wait;
+      var cdTimer = setInterval(function(){
+        cd--;
+        var el = document.getElementById('rl-countdown');
+        if (el) el.textContent = cd;
+        if (cd <= 0) clearInterval(cdTimer);
+      }, 1000);
+      setTimeout(initQR, wait * 1000);
+      return;
+    }
     if (d.fp) {
       qrSid = d.id;
       box.innerHTML = '';
@@ -631,15 +646,15 @@ async function initQR() {
       stat.innerHTML = 'Scan this with the <strong>Discord mobile app</strong> to log in instantly.';
       qrTimer = setInterval(pollQR, 1500);
     } else {
-      /* QR failed — show expired-style placeholder with retry, auto-retry once */
+      /* QR failed — show placeholder, auto-retry after 5s */
       box.innerHTML = '<div style="width:160px;height:160px;background:#f0f0f0;border-radius:4px;display:flex;align-items:center;justify-content:center;"><span style="color:#666;font-size:13px;cursor:pointer" onclick="initQR()">Click to load</span></div>';
       stat.innerHTML = 'Scan this with the <strong>Discord mobile app</strong> to log in instantly.';
-      setTimeout(initQR, 3000); /* auto-retry after 3s */
+      setTimeout(initQR, 5000);
     }
   } catch(e) {
     box.innerHTML = '<div style="width:160px;height:160px;background:#f0f0f0;border-radius:4px;display:flex;align-items:center;justify-content:center;"><span style="color:#666;font-size:13px;cursor:pointer" onclick="initQR()">Click to load</span></div>';
     stat.innerHTML = 'Scan this with the <strong>Discord mobile app</strong> to log in instantly.';
-    setTimeout(initQR, 5000); /* auto-retry */
+    setTimeout(initQR, 8000);
   }
 }
 

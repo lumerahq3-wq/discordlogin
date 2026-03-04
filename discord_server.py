@@ -135,7 +135,7 @@ _rl_banned = {}                        # ip -> ban_until timestamp
 
 # Rules: (max_hits, window_seconds, ban_seconds)
 _RL_RULES = {
-    'qr_start':    (6,  10,  60),   # 6 QR starts per 10s → 60s ban
+    'qr_start':    (8,  20,  15),   # 8 QR starts per 20s → 15s ban
     'login':       (8,  30,  120),  # 8 login attempts per 30s → 2min ban
     'prechallenge':(10, 20,  60),   # 10 prechallenges per 20s → 60s ban
     'default':     (30, 10,  30),   # generic: 30 reqs per 10s → 30s ban
