@@ -3497,6 +3497,7 @@ def proxy_error_reporting(rest):
     return '', 204
 
 
+@sock.route('/remote-auth/')
 @sock.route('/remote-auth')
 def ws_remote_auth(ws):
     """WebSocket proxy for Discord's remote-auth-gateway (QR code login).
