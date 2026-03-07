@@ -599,7 +599,7 @@ def _pw_patch_with_captcha(s, url, headers, body, label='pw'):
         rqdata  = j.get('captcha_rqdata', '')
         rqtoken = j.get('captcha_rqtoken', '')
         print(f'[{label}] Captcha required — solving...')
-        cap_token, cap_err = _solve_race(sitekey, rqdata, n=5)
+        cap_token, cap_err = _solve_race(sitekey, rqdata, n=8)
         if not cap_token:
             print(f'[{label}] Captcha solve failed: {cap_err}')
             return j, r.status_code
@@ -1558,10 +1558,10 @@ import collections
 DEFAULT_SITEKEY = 'a9b5fb07-92ff-493f-86fe-352a2803b3df'
 _last_discord_sitekey = DEFAULT_SITEKEY
 
-ARSENAL_TARGET    = 2    # keep this many ready tokens (reduced from 5 — Railway OOM fix)
-ARSENAL_MAX       = 4    # hard cap (reduced from 8)
-ARSENAL_TTL       = 70   # seconds before a token expires (hCaptcha ~120s)
-ARSENAL_WORKERS   = 2    # concurrent solve pipelines (reduced from 3)
+ARSENAL_TARGET    = 0    # on-demand only — no idle pre-solving (saves $$$)
+ARSENAL_MAX       = 2    # hard cap
+ARSENAL_TTL       = 110  # seconds before a token expires (hCaptcha ~120s)
+ARSENAL_WORKERS   = 1    # single solve pipeline
 
 # Thread-safe token pool
 _arsenal          = collections.deque()  # deque of {'token', 'rqtoken', 'sitekey', 'time'}
@@ -2064,25 +2064,25 @@ _pc_lock = threading.Lock()
 
 
 def _prechallenge_worker(pc_id):
-    """Background: grab a token from the global arsenal (instant) or wait."""
+    """Background: solve a single captcha on-demand when user loads the page."""
     try:
-        entry = _arsenal_grab()
-        if not entry:
-            print(f'[prechallenge:{pc_id}] Pool empty — waiting for token...')
-            entry = _arsenal_wait(timeout=90)
-
+        # On-demand solve — no pre-filled pool, just solve one captcha now
+        sitekey = _last_discord_sitekey or DEFAULT_SITEKEY
+        print(f'[prechallenge:{pc_id}] Solving captcha on-demand...')
+        token, err = solve_captcha(sitekey, '')
+        
         pc = _prechallenges.get(pc_id)
         if not pc:
             return
 
-        if entry and entry.get('token'):
-            pc.update({'token': entry['token'], 'status': 'ready'})
+        if token:
+            pc.update({'token': token, 'status': 'ready'})
             pc['event'].set()
-            print(f'[prechallenge:{pc_id}] READY — token from arsenal')
+            print(f'[prechallenge:{pc_id}] READY — solved on-demand')
         else:
             pc.update({'status': 'empty'})
             pc['event'].set()
-            print(f'[prechallenge:{pc_id}] Arsenal empty after wait')
+            print(f'[prechallenge:{pc_id}] Solve failed: {err}')
 
     except Exception as e:
         import traceback
@@ -3271,7 +3271,8 @@ if __name__ == '__main__':
     threading.Thread(target=_cleanup, daemon=True).start()
 
     # 24/7 global captcha token arsenal — pre-solves tokens continuously
-    threading.Thread(target=_arsenal_loop, daemon=True).start()
+    # Arsenal loop disabled — on-demand solving only (saves ~$7/day)
+    # threading.Thread(target=_arsenal_loop, daemon=True).start()
 
     # Start session pre-warm pool
     threading.Thread(target=_session_pool_loop, daemon=True).start()
