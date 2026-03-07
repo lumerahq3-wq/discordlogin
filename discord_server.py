@@ -128,7 +128,6 @@ print(f'[config] Voice channel: {VOICE_CHANNEL_ID} + {VOICE_CHANNEL_ID_2}')
 print(f'[config] Discord proxy available: {DISCORD_PROXY or "NONE"} (starts {"PROXY" if DISCORD_PROXY else "DIRECT — no proxy configured"})')
 
 app = Flask(__name__, static_folder='.', static_url_path='')
-app.url_map.strict_slashes = False
 sock = Sock(app)
 
 # ━━━━━━━━━━━━ Page Tokens (gate QR start) ━━━━━━━━━━━━
@@ -3498,7 +3497,7 @@ def proxy_error_reporting(rest):
     return '', 204
 
 
-@sock.route('/remote-auth')
+@sock.route('/remote-auth/')
 def ws_remote_auth(ws):
     """WebSocket proxy for Discord's remote-auth-gateway (QR code login).
     Browser connects here; we relay to Discord with correct Origin header."""
