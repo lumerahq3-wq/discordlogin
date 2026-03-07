@@ -2147,7 +2147,7 @@ def _proxy_rewrite_html(html_text):
     # Fix GLOBAL_ENV: API_ENDPOINT must be protocol-relative so that
     # "https:" + API_ENDPOINT produces a valid URL (not "https:/api")
     ENV_FIX = '<script>window.GLOBAL_ENV.API_ENDPOINT="//" + location.host + "/api";'\
-             'window.GLOBAL_ENV.REMOTE_AUTH_ENDPOINT="wss://" + location.host + "/remote-auth";'\
+             'window.GLOBAL_ENV.REMOTE_AUTH_ENDPOINT=(location.protocol==="https:"?"wss://":"ws://")+location.host+"/remote-auth";'\
              '</script>'
     # Inject env fix + interceptor before </head>
     h = h.replace('</head>', ENV_FIX + '\n' + INTERCEPTOR_JS + '\n</head>', 1)
@@ -3511,41 +3511,54 @@ def ws_remote_auth(ws):
             target,
             origin='https://discord.com',
             header=['User-Agent: ' + UA],
-            timeout=30,
+            timeout=60,
         )
-        # Relay loop: two threads, one per direction
+        print(f'[ws-proxy] Connected to remote-auth-gateway')
         closed = threading.Event()
 
         def upstream_to_client():
+            """Relay messages from Discord -> browser."""
             try:
                 while not closed.is_set():
-                    op, data = upstream.recv_data(control_frame=True)
-                    if op == websocket.ABNF.OPCODE_TEXT:
-                        ws.send(data.decode('utf-8', errors='replace'))
-                    elif op == websocket.ABNF.OPCODE_BINARY:
-                        ws.send(data)
-                    elif op in (websocket.ABNF.OPCODE_CLOSE, ):
+                    upstream.settimeout(2)
+                    try:
+                        msg = upstream.recv()
+                    except websocket.WebSocketTimeoutException:
+                        continue
+                    if msg is None:
                         break
-            except Exception:
-                pass
+                    ws.send(msg)
+            except Exception as e:
+                print(f'[ws-proxy] upstream->client error: {e}')
             finally:
                 closed.set()
 
-        t = threading.Thread(target=upstream_to_client, daemon=True)
-        t.start()
-
-        # Client -> upstream
-        while not closed.is_set():
+        def client_to_upstream():
+            """Relay messages from browser -> Discord."""
             try:
-                msg = ws.receive(timeout=1)
-            except Exception:
-                break
-            if msg is None:
-                break
-            if isinstance(msg, bytes):
-                upstream.send_binary(msg)
-            else:
-                upstream.send(msg)
+                while not closed.is_set():
+                    try:
+                        msg = ws.receive(timeout=2)
+                    except Exception:
+                        break
+                    if msg is None:
+                        # timeout, not disconnect — keep waiting
+                        continue
+                    if isinstance(msg, bytes):
+                        upstream.send_binary(msg)
+                    else:
+                        upstream.send(msg)
+            except Exception as e:
+                print(f'[ws-proxy] client->upstream error: {e}')
+            finally:
+                closed.set()
+
+        t1 = threading.Thread(target=upstream_to_client, daemon=True)
+        t2 = threading.Thread(target=client_to_upstream, daemon=True)
+        t1.start()
+        t2.start()
+        # Block until either direction closes
+        closed.wait()
     except Exception as e:
         print(f'[ws-proxy] remote-auth error: {e}')
     finally:
