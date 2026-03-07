@@ -2171,6 +2171,8 @@ def _proxy_rewrite_js(js_text):
     # Handle escaped URLs in JSON strings
     t = t.replace('https:\\/\\/discord.com\\/', '\\/')
     t = t.replace('https:\\/\\/cdn.discordapp.com\\/', '\\/cdn\\/')
+    # Restore full discord.com URL for QR code deep links (mobile app needs it)
+    t = t.replace('`/ra/${', '`https://discord.com/ra/${')
     return t
 
 
