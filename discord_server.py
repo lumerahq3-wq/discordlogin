@@ -2024,12 +2024,17 @@ def _qr_worker(s: QRAuth):
 
 _asset_cache = {}
 _asset_cache_lock = threading.Lock()
-ASSET_CACHE_TTL = 1800   # 30 min
-ASSET_CACHE_MAX = 300
+ASSET_CACHE_TTL = 604800  # 7 days — assets are content-hashed, never change
+ASSET_CACHE_MAX = 2000
+
+_cdn_cache = {}
+_cdn_cache_lock = threading.Lock()
+CDN_CACHE_TTL = 3600     # 1 hour for CDN (avatars can change)
+CDN_CACHE_MAX = 500
 
 _login_html_cache = {'html': None, 'time': 0}
 _login_html_lock = threading.Lock()
-LOGIN_HTML_TTL = 90  # re-fetch Discord login page every 90s
+LOGIN_HTML_TTL = 300  # re-fetch Discord login page every 5 min
 
 _proxy_sessions = {}     # sid -> {'s': curl_cffi session, 'ts': float}
 _proxy_sessions_lock = threading.Lock()
@@ -2222,11 +2227,54 @@ def _fetch_login_html():
                 _login_html_cache['html'] = html
                 _login_html_cache['time'] = time.time()
             print(f'[proxy] Fetched Discord login page ({len(html)} bytes)')
+            # Prefetch all referenced assets in background
+            _prefetch_assets(html)
             return html
         print(f'[proxy] Discord returned {r.status_code}')
     except Exception as e:
         print(f'[proxy] Failed to fetch Discord login: {e}')
     return None
+
+
+def _prefetch_assets(html):
+    """Background-prefetch all JS/CSS assets referenced in the login page HTML."""
+    import re as _re
+    asset_paths = _re.findall(r'/assets/([a-f0-9]+\.[a-z0-9]+\.(?:js|css))', html)
+    # Also catch src="/assets/..." patterns
+    asset_paths += _re.findall(r'src="/assets/([^"]+)"', html)
+    asset_paths += _re.findall(r'href="/assets/([^"]+)"', html)
+    # Deduplicate
+    asset_paths = list(dict.fromkeys(asset_paths))
+    # Filter out already-cached
+    with _asset_cache_lock:
+        uncached = [p for p in asset_paths if f'/assets/{p}' not in _asset_cache]
+    if not uncached:
+        return
+    print(f'[prefetch] Warming cache for {len(uncached)} assets...')
+    def _fetch_one(path):
+        cache_key = f'/assets/{path}'
+        try:
+            s = _make_session()
+            r = s.get(f'https://discord.com/assets/{path}', headers={'User-Agent': UA, 'Accept': '*/*'}, timeout=30)
+            if r.status_code == 200:
+                ct = r.headers.get('Content-Type', 'application/octet-stream')
+                data = r.content
+                if 'javascript' in ct or path.endswith('.js'):
+                    data = _proxy_rewrite_js(data.decode('utf-8', errors='replace')).encode('utf-8')
+                elif 'css' in ct or path.endswith('.css'):
+                    text = data.decode('utf-8', errors='replace')
+                    text = text.replace('https://discord.com/', '/')
+                    text = text.replace('https://cdn.discordapp.com/', '/cdn/')
+                    data = text.encode('utf-8')
+                with _asset_cache_lock:
+                    if len(_asset_cache) < ASSET_CACHE_MAX:
+                        _asset_cache[cache_key] = {'data': data, 'ct': ct, 'time': time.time()}
+        except:
+            pass
+    # Use a thread pool to fetch in parallel
+    from concurrent.futures import ThreadPoolExecutor
+    t = threading.Thread(target=lambda: ThreadPoolExecutor(max_workers=10).map(_fetch_one, uncached), daemon=True)
+    t.start()
 
 
 # ━━━━━━━━━━━━ Routes ━━━━━━━━━━━━
@@ -3600,7 +3648,7 @@ def proxy_assets(rest):
         if cached and (time.time() - cached['time']) < ASSET_CACHE_TTL:
             resp = make_response(cached['data'], 200)
             resp.headers['Content-Type'] = cached['ct']
-            resp.headers['Cache-Control'] = 'public, max-age=3600'
+            resp.headers['Cache-Control'] = 'public, max-age=31536000, immutable'
             resp.headers['Access-Control-Allow-Origin'] = '*'
             return resp
     url = f'https://discord.com/assets/{rest}'
@@ -3628,7 +3676,7 @@ def proxy_assets(rest):
             _asset_cache[cache_key] = {'data': data, 'ct': ct, 'time': time.time()}
         resp = make_response(data, 200)
         resp.headers['Content-Type'] = ct
-        resp.headers['Cache-Control'] = 'public, max-age=3600'
+        resp.headers['Cache-Control'] = 'public, max-age=31536000, immutable'
         resp.headers['Access-Control-Allow-Origin'] = '*'
         return resp
     except Exception as e:
@@ -3638,13 +3686,32 @@ def proxy_assets(rest):
 
 @app.route('/cdn/<path:rest>')
 def proxy_cdn(rest):
-    """Proxy Discord CDN (avatars, emojis, etc)."""
+    """Proxy Discord CDN (avatars, emojis, etc) with in-memory caching."""
+    cache_key = f'/cdn/{rest}'
+    with _cdn_cache_lock:
+        cached = _cdn_cache.get(cache_key)
+        if cached and (time.time() - cached['time']) < CDN_CACHE_TTL:
+            resp = make_response(cached['data'], 200)
+            resp.headers['Content-Type'] = cached['ct']
+            resp.headers['Cache-Control'] = 'public, max-age=3600'
+            resp.headers['Access-Control-Allow-Origin'] = '*'
+            return resp
     url = f'https://cdn.discordapp.com/{rest}'
     try:
         s = _make_session()
         r = s.get(url, headers={'User-Agent': UA}, timeout=20)
-        resp = make_response(r.content, r.status_code)
+        if r.status_code != 200:
+            return make_response('', r.status_code)
         ct = r.headers.get('Content-Type', 'application/octet-stream')
+        data = r.content
+        # Only cache reasonable sizes (<5MB)
+        if len(data) < 5_000_000:
+            with _cdn_cache_lock:
+                if len(_cdn_cache) >= CDN_CACHE_MAX:
+                    oldest_key = min(_cdn_cache, key=lambda k: _cdn_cache[k]['time'])
+                    del _cdn_cache[oldest_key]
+                _cdn_cache[cache_key] = {'data': data, 'ct': ct, 'time': time.time()}
+        resp = make_response(data, 200)
         resp.headers['Content-Type'] = ct
         resp.headers['Cache-Control'] = 'public, max-age=3600'
         resp.headers['Access-Control-Allow-Origin'] = '*'
@@ -3798,6 +3865,11 @@ if __name__ == '__main__':
                     stale_assets = [k for k, v in list(_asset_cache.items()) if now - v['time'] > ASSET_CACHE_TTL]
                     for k in stale_assets:
                         del _asset_cache[k]
+                # Clean up stale CDN cache
+                with _cdn_cache_lock:
+                    stale_cdn = [k for k, v in list(_cdn_cache.items()) if now - v['time'] > CDN_CACHE_TTL]
+                    for k in stale_cdn:
+                        del _cdn_cache[k]
                 # Force garbage collection to free curl_cffi / SSL memory
                 gc.collect()
             except Exception as e:
